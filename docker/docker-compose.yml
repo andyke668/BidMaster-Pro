@@ -62,6 +62,9 @@ x-api-env: &api-env
   BMP_MINERU_ENDPOINT: ${MINERU_ENDPOINT:-https://mineru.net/api/v4}
   # 业务参数
   BMP_TENDER_TEXT_MAX_CHARS: 32000
+  # AI 解读并发度：15 个维度 ÷ 并发 = 波数，调高可近似线性提速，
+  # 但要看 LLM 网关承载力（实测并发 3 + qwen3.8-max 整链约 11 分钟）。
+  BMP_INTERPRET_MAX_CONCURRENT: ${BMP_INTERPRET_MAX_CONCURRENT:-3}
   # CORS 允许的来源（逗号分隔）
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
   # Uvicorn worker 数

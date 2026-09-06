@@ -187,22 +187,41 @@ export const interpretApi = {
     has_documents: boolean;
     has_parsed: boolean;
     has_analysis: boolean;
+    // 解读改为异步任务后，这两个字段用于轮询判定：
+    // interpret_running 表示后台仍在跑，updated_at 用于识别「本次」的新结果。
+    interpret_running?: boolean;
     analysis: {
       dimensions: Record<string, unknown> | null;
       scoring_matrix: Record<string, unknown> | null;
       risk_flags: Record<string, unknown> | null;
       sections: unknown[] | null;
+      updated_at?: string | null;
     } | null;
     parse_info: {
       text_length: number;
       doc_metadata: Record<string, unknown> | null;
     } | null;
   }>(`/interpret/analysis/${projectId}`),
-  // 解读链（interpret）串行调用十余次大模型，推理型模型单次可达 40-160s，
-  // 整链 3-5 分钟，远超 axios 全局 120s 默认超时，故按接口单独放宽。
+  // 解析大文件可能耗时数分钟，单独放宽（全局默认 120s 不够）。
   parse: (projectId: string) => api.post(`/interpret/parse/${projectId}`, {}, { timeout: 300000 }),
+  // 解读整链实测约 11 分钟，远超任何合理的 HTTP 超时，后端已改为异步任务：
+  // 本接口只负责提交，立即返回 task_id，进度由 getInterpretTask + getAnalysis 轮询。
   interpret: (projectId: string) =>
-    api.post(`/interpret/interpret/${projectId}`, {}, { timeout: 600000 }),
+    api.post<{ task_id: string; status: string; project_id: string; message: string }>(
+      `/interpret/interpret/${projectId}`,
+      {},
+      { timeout: 60000 }
+    ),
+  getInterpretTask: (taskId: string) =>
+    api.get<{
+      task_id: string;
+      status: 'pending' | 'running' | 'completed' | 'failed' | 'unknown';
+      progress?: number;
+      progress_message?: string;
+      result?: { success: boolean; error?: string | null } | null;
+      error?: string | null;
+      elapsed_seconds?: number;
+    }>(`/interpret/task/${taskId}`),
   scoringMatrix: (projectId: string) =>
     api.post(`/interpret/scoring-matrix/${projectId}`, {}, { timeout: 600000 }),
   riskAlert: (projectId: string) => api.post(`/interpret/risk-alert/${projectId}`),

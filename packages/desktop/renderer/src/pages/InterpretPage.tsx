@@ -31,6 +31,18 @@ interface InterpretResult {
   warnings?: string[];
 }
 
+// 解读整链实测约 11 分钟（15 维度 ÷ 并发 3，推理型模型单次 75-141s），
+// 后端已改为异步任务，这里只负责轮询，不再受 HTTP 超时约束。
+const INTERPRET_POLL_INTERVAL_MS = 6000;
+const INTERPRET_POLL_BUDGET_MS = 40 * 60 * 1000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const formatElapsed = (ms: number) => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)} 分 ${total % 60} 秒`;
+};
+
 const STEP_CONFIG: Array<{ key: Step; label: string; icon: typeof Upload }> = [
   { key: 'upload', label: '上传文件', icon: Upload },
   { key: 'parse', label: '解析文件', icon: FileText },
@@ -153,6 +165,7 @@ export default function InterpretPage() {
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [interpretResult, setInterpretResult] = useState<InterpretResult | null>(null);
   const [error, setError] = useState<string>('');
+  const [interpretProgress, setInterpretProgress] = useState<string>('');
   const [dragOver, setDragOver] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<{ name: string; content: string; metadata: Record<string, unknown> } | null>(null);
   const [restoring, setRestoring] = useState(false);
@@ -189,6 +202,13 @@ export default function InterpretPage() {
     try {
       const res = await interpretApi.getAnalysis(projectId);
       const data = res.data;
+
+      // 刷新时若后台仍在解读，明确告知，避免把上一轮旧结果误当本次结果。
+      setInterpretProgress(
+        data.interpret_running
+          ? 'AI 解读正在后台进行中（通常需 5-15 分钟），完成后刷新页面即可看到最新结果'
+          : ''
+      );
 
       if (data.has_documents) {
         const docRes = await interpretApi.listDocuments(projectId);
@@ -277,41 +297,93 @@ export default function InterpretPage() {
 
   const handleInterpret = async () => {
     if (!selectedProjectId) return;
+    const projectId = selectedProjectId;
     setLoading(true);
     setError('');
+    setInterpretProgress('正在提交解读任务…');
     try {
-      const res = await interpretApi.interpret(selectedProjectId);
-      setInterpretResult(res.data as InterpretResult);
-      advanceToStep('done');
-    } catch (e: unknown) {
-      const err = e as {
-        code?: string;
-        message?: string;
-        response?: { data?: { detail?: string } };
-      };
-      // 解读整链会跑 3-5 分钟，超时不等于失败：后端仍在继续并最终落库。
-      const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
-      if (isTimeout) {
+      // 提交是秒回的：后端把整链丢给 TaskManager 异步跑，结果落 analyses 表。
+      const submit = await interpretApi.interpret(projectId);
+      const taskId = submit.data.task_id;
+      const submittedAt = Date.now();
+      setInterpretProgress('AI 解读进行中，已用 0 分 0 秒（通常需 5-15 分钟，请勿重复提交）');
+
+      while (Date.now() - submittedAt < INTERPRET_POLL_BUDGET_MS) {
+        await sleep(INTERPRET_POLL_INTERVAL_MS);
+        const elapsed = Date.now() - submittedAt;
+
+        let status: string;
+        let taskError = '';
         try {
-          const saved = await interpretApi.getAnalysis(selectedProjectId);
+          const task = await interpretApi.getInterpretTask(taskId);
+          status = task.data.status;
+          taskError = task.data.error || task.data.result?.error || '';
+        } catch {
+          status = 'unknown';
+        }
+
+        if (status === 'failed') {
+          setInterpretProgress('');
+          setError(taskError || '解读失败');
+          return;
+        }
+
+        if (status === 'completed') {
+          const saved = await interpretApi.getAnalysis(projectId);
           if (saved.data.has_analysis && saved.data.analysis?.dimensions) {
             setInterpretResult({
               success: true,
               data: { dimensions: saved.data.analysis.dimensions },
             });
+            setInterpretProgress('');
             advanceToStep('done');
             return;
           }
-        } catch {
-          // 探测失败就退回下面的超时提示
+          setInterpretProgress('');
+          setError('解读任务已完成，但未取到结果，请刷新页面重试');
+          return;
         }
-        setError(
-          '解读耗时较长已超时，后台仍在处理中，请 3-5 分钟后刷新页面查看结果；' +
-            '也可在「平台设置 - 智能体模型配置」中为 interpret 换用更快的模型。'
-        );
-      } else {
-        setError(err?.response?.data?.detail || '解读失败');
+
+        if (status === 'unknown') {
+          // 任务表是进程内的，多 worker 下轮询可能落到另一个 worker。
+          // 回退到 DB 判定：仅当后台确认不在跑、且已过冷启动窗口才采信，
+          // 避免把上一轮的旧结果当成本次结果瞬间返回。
+          if (elapsed > 60_000) {
+            try {
+              const saved = await interpretApi.getAnalysis(projectId);
+              if (
+                saved.data.has_analysis &&
+                saved.data.analysis?.dimensions &&
+                saved.data.interpret_running === false
+              ) {
+                setInterpretResult({
+                  success: true,
+                  data: { dimensions: saved.data.analysis.dimensions },
+                });
+                setInterpretProgress('');
+                advanceToStep('done');
+                return;
+              }
+            } catch {
+              // 单次探测失败不影响下一轮轮询
+            }
+          }
+        } else {
+          setInterpretProgress(
+            `AI 解读进行中，已用 ${formatElapsed(elapsed)}（通常需 5-15 分钟，请勿重复提交）`
+          );
+        }
       }
+
+      setInterpretProgress('');
+      setError(
+        '解读耗时超出预期（>40 分钟），后台可能仍在处理，请稍后刷新页面查看结果；' +
+          '也可在「平台设置 - 智能体模型配置」中为 interpret 换用更快的模型（如 qwen3.7-flash）。'
+      );
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } } };
+      setInterpretProgress('');
+      setError(err?.response?.data?.detail || '解读失败');
     } finally {
       setLoading(false);
     }
@@ -750,6 +822,12 @@ export default function InterpretPage() {
               </button>
             </div>
           </>
+        )}
+
+        {interpretProgress && (
+          <div style={{ marginTop: '16px', padding: '12px', background: '#eff6ff', borderRadius: '8px', border: '1px solid #bfdbfe', color: '#1d4ed8', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Loader2 size={16} className="animate-spin" /> {interpretProgress}
+          </div>
         )}
 
         {error && (
