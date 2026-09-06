@@ -18,7 +18,8 @@ WORKDIR /build
 # 先拷贝依赖声明，利用层缓存（package*.json 匹配 package.json，若有 lock 一并拷入）
 COPY packages/desktop/package*.json ./
 # 如果 lock 不存在，跳过 npm ci 回退到 npm install
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN npm config set registry ${NPM_REGISTRY} && if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # 拷贝网页版源码与配置（tsconfig.json / vite.config.ts / renderer / preload / main）
 COPY packages/desktop/ ./

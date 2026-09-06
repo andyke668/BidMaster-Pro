@@ -30,7 +30,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 
 # 安装生产依赖到独立 prefix
-RUN pip install --prefix=/install .
+RUN pip install --prefix=/install --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com .
 
 
 # ─────────────── Stage 2: runtime ───────────────
