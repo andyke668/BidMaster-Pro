@@ -7,7 +7,7 @@ from typing import List
 class Embedder:
     def __init__(self, config: dict):
         self.mode = config.get("mode", "api")
-        self.model_name = config.get("model_name", "text-embedding-v3")
+        self.model_name = config.get("model_name") or config.get("model") or "text-embedding-v3"
         self.api_key = config.get("api_key", "")
         self.api_base = config.get("api_base", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self._local_model = None

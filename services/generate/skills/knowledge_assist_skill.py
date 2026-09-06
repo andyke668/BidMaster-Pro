@@ -83,8 +83,10 @@ class KnowledgeAssistSkill(Skill):
             from core.rag_engine.embedder import Embedder
             from core.rag_engine.retriever import HybridRetriever
 
-            vector_store = VectorStore()
-            embedder = Embedder()
+            from core.settings import get_settings as _get_settings
+            _st = _get_settings()
+            vector_store = VectorStore(persist_dir=_st.chroma_dir)
+            embedder = Embedder({"mode": _st.embedding_mode, "model_name": _st.embedding_model, "api_key": _st.embedding_api_key, "api_base": _st.embedding_api_base})
             retriever = HybridRetriever(vector_store=vector_store, embedder=embedder)
             results = await retriever.retrieve(query, top_k=top_k)
             return results
