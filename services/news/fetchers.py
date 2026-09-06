@@ -12,8 +12,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 from datetime import datetime, timedelta
+import asyncio
 import requests
 import feedparser
+
+# 注意：requests 是同步库。单 worker + asyncio 部署下，直接在协程里调用会把
+# 整条事件循环阻塞住（聚合期间全站无响应，其它接口的轮询也会一起卡死），
+# 上层 asyncio.Semaphore(4) 的并发也形同虚设。
+# 因此本文件所有 requests.get 一律用 asyncio.to_thread 放进线程池执行。
 
 
 @dataclass
@@ -64,7 +70,8 @@ class RSSFetcher(BaseFetcher):
             return []
 
         try:
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 url,
                 timeout=15,
                 headers={"User-Agent": "BidMaster-Pro/1.0 (Tender Monitor)"},
@@ -123,7 +130,8 @@ class RSSFetcher(BaseFetcher):
         失败时回退到 RSS summary。
         """
         try:
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 url,
                 timeout=10,
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
@@ -180,7 +188,8 @@ class APIFetcher(BaseFetcher):
         query = f"{languages} {topics} stars:>={cfg.get('min_stars', 5)}"
 
         try:
-            resp = requests.get(
+            resp = await asyncio.to_thread(
+                requests.get,
                 config.get("url", "https://api.github.com/search/repositories"),
                 params={"q": query, "sort": "stars", "per_page": cfg.get("max_results", 20)},
                 timeout=30,

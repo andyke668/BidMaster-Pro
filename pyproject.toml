@@ -27,6 +27,7 @@ dependencies = [
     "mammoth>=1.8",
     "chardet>=5.0",
     "beautifulsoup4>=4.12",
+    "feedparser>=6.0",
     "celery[redis]>=5.3",
     "redis>=5.0",
     "minio>=7.2",

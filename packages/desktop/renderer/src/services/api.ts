@@ -537,7 +537,10 @@ export const newsApi = {
     company_profile?: Record<string, unknown>;
     is_hot_threshold?: number;
     persist?: boolean;
-  }) => api.post<AggregateResponse>('/news/aggregate', payload),
+  }) =>
+    // 聚合要抓取数十个外部源（每源 RSS + 最多 30 个详情页），实测需数分钟，
+    // 全局 120s 默认超时不够。
+    api.post<AggregateResponse>('/news/aggregate', payload, { timeout: 600000 }),
   listHotspots: (params?: {
     industry_code?: string;
     region?: string;
