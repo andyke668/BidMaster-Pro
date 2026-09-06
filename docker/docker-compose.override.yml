@@ -1,0 +1,20 @@
+# 部署期覆盖文件（由 deploy_bidmaster.sh 生成）
+# 作用：1) 固定 compose 项目名；2) 按 5.8G 内存机器（已跑 OpenBidKit）收紧资源上限
+name: bidmaster
+
+services:
+  api:
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+  postgres:
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+  web:
+    deploy:
+      resources:
+        limits:
+          memory: 128m
