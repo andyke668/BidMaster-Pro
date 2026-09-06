@@ -198,9 +198,13 @@ export const interpretApi = {
       doc_metadata: Record<string, unknown> | null;
     } | null;
   }>(`/interpret/analysis/${projectId}`),
-  parse: (projectId: string) => api.post(`/interpret/parse/${projectId}`),
-  interpret: (projectId: string) => api.post(`/interpret/interpret/${projectId}`),
-  scoringMatrix: (projectId: string) => api.post(`/interpret/scoring-matrix/${projectId}`),
+  // 解读链（interpret）串行调用十余次大模型，推理型模型单次可达 40-160s，
+  // 整链 3-5 分钟，远超 axios 全局 120s 默认超时，故按接口单独放宽。
+  parse: (projectId: string) => api.post(`/interpret/parse/${projectId}`, {}, { timeout: 300000 }),
+  interpret: (projectId: string) =>
+    api.post(`/interpret/interpret/${projectId}`, {}, { timeout: 600000 }),
+  scoringMatrix: (projectId: string) =>
+    api.post(`/interpret/scoring-matrix/${projectId}`, {}, { timeout: 600000 }),
   riskAlert: (projectId: string) => api.post(`/interpret/risk-alert/${projectId}`),
   exportReport: (projectId: string, format: string = 'markdown') =>
     api.post(`/interpret/export/${projectId}?format=${format}`, null, { responseType: 'blob' }),

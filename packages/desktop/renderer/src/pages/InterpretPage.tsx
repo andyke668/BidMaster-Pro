@@ -284,8 +284,34 @@ export default function InterpretPage() {
       setInterpretResult(res.data as InterpretResult);
       advanceToStep('done');
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '解读失败';
-      setError(msg);
+      const err = e as {
+        code?: string;
+        message?: string;
+        response?: { data?: { detail?: string } };
+      };
+      // 解读整链会跑 3-5 分钟，超时不等于失败：后端仍在继续并最终落库。
+      const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
+      if (isTimeout) {
+        try {
+          const saved = await interpretApi.getAnalysis(selectedProjectId);
+          if (saved.data.has_analysis && saved.data.analysis?.dimensions) {
+            setInterpretResult({
+              success: true,
+              data: { dimensions: saved.data.analysis.dimensions },
+            });
+            advanceToStep('done');
+            return;
+          }
+        } catch {
+          // 探测失败就退回下面的超时提示
+        }
+        setError(
+          '解读耗时较长已超时，后台仍在处理中，请 3-5 分钟后刷新页面查看结果；' +
+            '也可在「平台设置 - 智能体模型配置」中为 interpret 换用更快的模型。'
+        );
+      } else {
+        setError(err?.response?.data?.detail || '解读失败');
+      }
     } finally {
       setLoading(false);
     }

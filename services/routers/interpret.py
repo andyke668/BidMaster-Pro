@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -14,6 +15,14 @@ router = APIRouter()
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".wps", ".md"}
+
+# 解读链路（TenderInterpretSkill）会串行调用十余次大模型，整链常需 3-5 分钟。
+# 前端超时/用户误以为卡死而重复点击，会让多条流水线同时压向 LLM 网关，
+# 反而把网关打挂、所有请求一起超时。这里做在途登记，拒绝并发重复解读。
+# 注意：uvicorn 多 worker 时每个 worker 各持一份，属尽力而为的护栏；
+# 残留条目按 _INTERPRET_TTL 秒过期，不会永久锁死某个项目。
+_INTERPRET_TTL = 900
+_interpret_inflight: dict[str, float] = {}
 
 
 @router.post("/upload/{project_id}")
@@ -205,6 +214,13 @@ async def interpret_tender(project_id: str, db: AsyncSession = Depends(get_db)):
     if not doc or not doc.parsed_content:
         raise HTTPException(status_code=400, detail="请先解析招标文件")
 
+    started = _interpret_inflight.get(project_id)
+    if started is not None and time.monotonic() - started < _INTERPRET_TTL:
+        raise HTTPException(
+            status_code=409,
+            detail="该项目正在解读中（约需 3-5 分钟），请勿重复提交，稍后刷新页面查看结果",
+        )
+
     from services.interpret.skills.tender_interpret_skill import TenderInterpretSkill
     from core.skill_engine.base import SkillContext
 
@@ -216,7 +232,13 @@ async def interpret_tender(project_id: str, db: AsyncSession = Depends(get_db)):
         llm=gateway,
         parameters={"document_text": doc.parsed_content},
     )
-    skill_result = await skill.safe_execute(ctx)
+    _interpret_inflight[project_id] = time.monotonic()
+    try:
+        skill_result = await skill.safe_execute(ctx)
+    finally:
+        # safe_execute 只吞 Exception，CancelledError 等仍会外抛，
+        # 用 finally 保证在途登记一定被摘除，不会把项目锁满 TTL。
+        _interpret_inflight.pop(project_id, None)
 
     if skill_result.success:
         existing = await db.execute(
