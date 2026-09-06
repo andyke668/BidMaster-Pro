@@ -43,6 +43,15 @@ const formatElapsed = (ms: number) => {
   return `${Math.floor(total / 60)} 分 ${total % 60} 秒`;
 };
 
+// 后端存的是 naive UTC（无时区后缀，可能带 6 位微秒）。JS 对无偏移的
+// date-time 按本地时区解释，直接 Date.parse 会差 8 小时，故截到毫秒后补 Z。
+const parseServerUtc = (iso?: string | null): number => {
+  if (!iso) return 0;
+  const normalized = iso.replace(/(\.\d{3})\d+/, '$1').replace(/Z$/, '') + 'Z';
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
 const STEP_CONFIG: Array<{ key: Step; label: string; icon: typeof Upload }> = [
   { key: 'upload', label: '上传文件', icon: Upload },
   { key: 'parse', label: '解析文件', icon: FileText },
@@ -314,15 +323,19 @@ export default function InterpretPage() {
 
         let status: string;
         let taskError = '';
+        // 后台函数返回 {success:false} 而非抛异常时，TaskManager 记为 completed，
+        // 所以必须再看 result.success，否则会把上一轮的旧结果当成本次成功。
+        let taskSucceeded: boolean | undefined;
         try {
           const task = await interpretApi.getInterpretTask(taskId);
           status = task.data.status;
           taskError = task.data.error || task.data.result?.error || '';
+          taskSucceeded = task.data.result?.success;
         } catch {
           status = 'unknown';
         }
 
-        if (status === 'failed') {
+        if (status === 'failed' || (status === 'completed' && taskSucceeded === false)) {
           setInterpretProgress('');
           setError(taskError || '解读失败');
           return;
@@ -351,7 +364,12 @@ export default function InterpretPage() {
           if (elapsed > 60_000) {
             try {
               const saved = await interpretApi.getAnalysis(projectId);
+              // 必须是本次提交之后写入的结果，否则读到的是上一轮的旧数据。
+              // 留 2 分钟容差吸收前后端时钟偏移。
+              const savedAt = parseServerUtc(saved.data.analysis?.updated_at);
+              const isFresh = savedAt > 0 && savedAt >= submittedAt - 120_000;
               if (
+                isFresh &&
                 saved.data.has_analysis &&
                 saved.data.analysis?.dimensions &&
                 saved.data.interpret_running === false
