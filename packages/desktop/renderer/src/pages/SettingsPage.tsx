@@ -49,6 +49,7 @@ interface LLMConfigItem {
   is_default: boolean;
   enabled: boolean;
   note: string;
+  models: string[];
 }
 
 export default function SettingsPage() {
@@ -60,8 +61,8 @@ export default function SettingsPage() {
 
   const [llmConfigs, setLlmConfigs] = useState<LLMConfigItem[]>([]);
   const [llmConfigsLoading, setLlmConfigsLoading] = useState(false);
-  const [llmConfigDialog, setLlmConfigDialog] = useState<{ open: boolean; mode: 'create' | 'edit'; configId: string | null; providerId: string; displayName: string; apiKey: string; apiBase: string; defaultModel: string; enabled: boolean; note: string; showKey: boolean }>({
-    open: false, mode: 'create', configId: null, providerId: 'deepseek', displayName: '', apiKey: '', apiBase: '', defaultModel: '', enabled: true, note: '', showKey: false,
+  const [llmConfigDialog, setLlmConfigDialog] = useState<{ open: boolean; mode: 'create' | 'edit'; configId: string | null; providerId: string; displayName: string; apiKey: string; apiBase: string; defaultModel: string; enabled: boolean; note: string; showKey: boolean; models: string[]; fetchingModels: boolean }>({
+    open: false, mode: 'create', configId: null, providerId: 'deepseek', displayName: '', apiKey: '', apiBase: '', defaultModel: '', enabled: true, note: '', showKey: false, models: [], fetchingModels: false,
   });
   const [llmConfigSaving, setLlmConfigSaving] = useState(false);
   const [llmConfigRevealed, setLlmConfigRevealed] = useState<{ [id: string]: string }>({});
@@ -183,7 +184,7 @@ export default function SettingsPage() {
       open: true, mode: 'create', configId: null,
       providerId: firstProvider,
       displayName: '', apiKey: '', apiBase: providerApiBases[firstProvider] || '',
-      defaultModel: '', enabled: true, note: '', showKey: true,
+      defaultModel: '', enabled: true, note: '', showKey: true, models: [], fetchingModels: false,
     });
     setLlmConfigRevealed({});
   };
@@ -193,7 +194,7 @@ export default function SettingsPage() {
       open: true, mode: 'edit', configId: cfg.id,
       providerId: cfg.provider_id, displayName: cfg.display_name || '',
       apiKey: '', apiBase: cfg.api_base || '', defaultModel: cfg.default_model || '',
-      enabled: cfg.enabled, note: cfg.note || '', showKey: true,
+      enabled: cfg.enabled, note: cfg.note || '', showKey: true, models: cfg.models || [], fetchingModels: false,
     });
     setLlmConfigRevealed({});
     try {
@@ -209,6 +210,10 @@ export default function SettingsPage() {
       setTestResult({ success: false, message: '请填写供应商和 API Key' });
       return;
     }
+    if (llmConfigDialog.providerId === 'custom' && !llmConfigDialog.apiBase) {
+      setTestResult({ success: false, message: '自定义供应商必须填写 API Base URL' });
+      return;
+    }
     setLlmConfigSaving(true);
     try {
       if (llmConfigDialog.mode === 'create') {
@@ -220,6 +225,7 @@ export default function SettingsPage() {
           default_model: llmConfigDialog.defaultModel,
           enabled: llmConfigDialog.enabled,
           note: llmConfigDialog.note,
+          models: llmConfigDialog.models,
         });
         setTestResult({ success: true, message: '配置已创建' });
       } else {
@@ -230,6 +236,7 @@ export default function SettingsPage() {
           default_model: llmConfigDialog.defaultModel,
           enabled: llmConfigDialog.enabled,
           note: llmConfigDialog.note,
+          models: llmConfigDialog.models,
         });
         setTestResult({ success: true, message: '配置已更新' });
       }
@@ -270,7 +277,11 @@ export default function SettingsPage() {
     try {
       const revealRes = await llmApi.revealConfigKey(cfg.id);
       const realKey = revealRes.data.api_key;
-      const modelName = cfg.default_model || `${cfg.provider_id}/default`;
+      const modelName = cfg.default_model || (cfg.models && cfg.models[0]) || '';
+      if (!modelName) {
+        setTestResult({ success: false, message: '该配置没有可用模型，请先编辑并选择默认模型' });
+        return;
+      }
       const testPayload: Record<string, string> = {
         provider: cfg.provider_id,
         api_key: realKey,
@@ -286,6 +297,36 @@ export default function SettingsPage() {
       }
     } catch (e: unknown) {
       setTestResult({ success: false, message: e instanceof Error ? e.message : '测试失败' });
+    }
+  };
+
+  const handleFetchModels = async () => {
+    const { apiBase, apiKey, configId, mode } = llmConfigDialog;
+    if (!apiBase) {
+      setTestResult({ success: false, message: '请先填写 API Base URL' });
+      return;
+    }
+    if (mode === 'create' && !apiKey) {
+      setTestResult({ success: false, message: '请先填写 API Key' });
+      return;
+    }
+    setLlmConfigDialog(prev => ({ ...prev, fetchingModels: true }));
+    try {
+      const payload: Record<string, unknown> = { api_base: apiBase };
+      if (apiKey) payload.api_key = apiKey;
+      if (mode === 'edit' && configId) payload.config_id = configId;
+      const res = await llmApi.fetchModels(payload);
+      if (res.data.success) {
+        const models: string[] = res.data.models || [];
+        setLlmConfigDialog(prev => ({ ...prev, models, fetchingModels: false }));
+        setTestResult({ success: true, message: `已获取 ${models.length} 个模型，请在下拉中选择` });
+      } else {
+        setLlmConfigDialog(prev => ({ ...prev, fetchingModels: false }));
+        setTestResult({ success: false, message: res.data.error || '获取模型失败' });
+      }
+    } catch (e: unknown) {
+      setLlmConfigDialog(prev => ({ ...prev, fetchingModels: false }));
+      setTestResult({ success: false, message: e instanceof Error ? e.message : '获取模型失败' });
     }
   };
 
@@ -497,18 +538,23 @@ export default function SettingsPage() {
     return m;
   }, [providers]);
 
-  // 智能体可选模型：仅从用户已配置的 LLM 中生成
+  const countProviderConfigs = (pid: string) =>
+    llmConfigs.filter(c => pid === 'custom' ? c.provider_id.startsWith('custom') : c.provider_id === pid).length;
+
+  // 智能体可选模型：从已启用配置展开全部可用模型（自定义供应商含网关获取的模型列表）
   const agentModelOptions = llmConfigs
-    .filter(c => c.enabled && c.default_model)
-    .map(c => {
-      const providerName = providerNameMap[c.provider_id] || c.provider_id;
+    .filter(c => c.enabled)
+    .flatMap(c => {
+      const providerName = c.provider_id.startsWith('custom') ? '自定义' : (providerNameMap[c.provider_id] || c.provider_id);
       const tag = c.display_name ? `${providerName} · ${c.display_name}` : providerName;
-      return {
+      const models = c.models && c.models.length > 0 ? c.models : (c.default_model ? [c.default_model] : []);
+      return models.map(m => ({
+        key: `${c.id}:${m}`,
         configId: c.id,
-        value: `${c.provider_id}/${c.default_model}`,
-        label: `${tag} — ${c.default_model}${c.is_default ? '（默认）' : ''}`,
-        isDefault: c.is_default,
-      };
+        value: `${c.provider_id}/${m}`,
+        label: `${tag} — ${m}${c.is_default && m === c.default_model ? '（默认）' : ''}`,
+        isDefault: c.is_default && m === c.default_model,
+      }));
     });
 
   const defaultLlmConfig = llmConfigs.find(c => c.is_default && c.enabled) || null;
@@ -727,7 +773,7 @@ export default function SettingsPage() {
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {llmConfigs.map(cfg => {
-              const providerName = providers.find(p => p.id === cfg.provider_id)?.name || cfg.provider_id;
+              const providerName = cfg.provider_id.startsWith('custom') ? '自定义供应商' : (providers.find(p => p.id === cfg.provider_id)?.name || cfg.provider_id);
               const isRevealed = llmConfigRevealed[cfg.id] !== undefined;
               return (
                 <div
@@ -795,6 +841,12 @@ export default function SettingsPage() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <span style={{ color: 'var(--color-text-secondary)', minWidth: '72px' }}>默认模型:</span>
                         <code style={{ background: '#f0f9ff', padding: '2px 6px', borderRadius: '4px', fontSize: '11px', color: '#1a56db' }}>{cfg.default_model}</code>
+                      </div>
+                    )}
+                    {cfg.models && cfg.models.length > 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ color: 'var(--color-text-secondary)', minWidth: '72px' }}>可用模型:</span>
+                        <span style={{ fontSize: '11px', color: '#64748b' }}>{cfg.models.length} 个：{cfg.models.slice(0, 4).join('、')}{cfg.models.length > 4 ? ' …' : ''}</span>
                       </div>
                     )}
                     {cfg.api_base && (
@@ -871,7 +923,7 @@ export default function SettingsPage() {
                   </span>
                 </div>
                 <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
-                  {providerApiBases[p.id] || ''}
+                  {p.id === 'custom' ? '填写你的统一网关地址（OpenAI 兼容，如 http://host:port/v1），可一键获取模型' : (providerApiBases[p.id] || '')}
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)', marginTop: '6px', display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
                   {p.models.map(m => (
@@ -920,7 +972,8 @@ export default function SettingsPage() {
                     setLlmConfigDialog(prev => ({
                       ...prev,
                       providerId: pid,
-                      apiBase: providerApiBases[pid] || prev.apiBase,
+                      apiBase: pid === 'custom' ? '' : (providerApiBases[pid] || prev.apiBase),
+                      models: [],
                     }));
                   }}
                   style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', background: llmConfigDialog.mode === 'edit' ? '#f1f5f9' : 'white' }}
@@ -971,12 +1024,14 @@ export default function SettingsPage() {
               </div>
 
               <div>
-                <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>API Base URL</label>
+                <label style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '4px' }}>
+                  API Base URL{llmConfigDialog.providerId === 'custom' && <span style={{ color: '#dc2626' }}> *</span>}
+                </label>
                 <input
                   type="text"
                   value={llmConfigDialog.apiBase}
                   onChange={(e) => setLlmConfigDialog(prev => ({ ...prev, apiBase: e.target.value }))}
-                  placeholder="https://..."
+                  placeholder={llmConfigDialog.providerId === 'custom' ? '如: http://192.168.40.113:8088/v1（OpenAI 兼容网关）' : 'https://...'}
                   style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }}
                 />
               </div>
@@ -988,23 +1043,53 @@ export default function SettingsPage() {
                     type="text"
                     value={llmConfigDialog.defaultModel}
                     onChange={(e) => setLlmConfigDialog(prev => ({ ...prev, defaultModel: e.target.value }))}
-                    placeholder={llmConfigDialog.providerId === 'siliconflow' ? '如: deepseek-ai/DeepSeek-V3' : '如: deepseek-chat'}
+                    placeholder={llmConfigDialog.providerId === 'custom' ? '点「获取模型」选择，或手动输入' : (llmConfigDialog.providerId === 'siliconflow' ? '如: deepseek-ai/DeepSeek-V3' : '如: deepseek-chat')}
                     style={{ flex: 1, padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }}
                   />
-                  <select
-                    value=""
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        setLlmConfigDialog(prev => ({ ...prev, defaultModel: e.target.value }));
-                      }
-                    }}
-                    style={{ padding: '8px 10px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '12px', background: 'white', maxWidth: '150px' }}
-                  >
-                    <option value="">预设模型...</option>
-                    {providers.find(p => p.id === llmConfigDialog.providerId)?.models.map(m => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
+                  {llmConfigDialog.providerId === 'custom' ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleFetchModels}
+                        disabled={llmConfigDialog.fetchingModels}
+                        title="调用网关 GET /models 拉取可用模型"
+                        style={{ padding: '8px 10px', background: '#eff6ff', color: '#1a56db', border: '1px solid #bfdbfe', borderRadius: '6px', cursor: llmConfigDialog.fetchingModels ? 'not-allowed' : 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap', opacity: llmConfigDialog.fetchingModels ? 0.6 : 1 }}
+                      >
+                        {llmConfigDialog.fetchingModels ? <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> : <Cloud size={12} />}
+                        {llmConfigDialog.fetchingModels ? '获取中...' : '获取模型'}
+                      </button>
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            setLlmConfigDialog(prev => ({ ...prev, defaultModel: e.target.value }));
+                          }
+                        }}
+                        disabled={llmConfigDialog.models.length === 0}
+                        style={{ padding: '8px 10px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '12px', background: 'white', maxWidth: '180px' }}
+                      >
+                        <option value="">{llmConfigDialog.models.length > 0 ? `已获取 ${llmConfigDialog.models.length} 个模型...` : '先点「获取模型」'}</option>
+                        {llmConfigDialog.models.map(m => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                    </>
+                  ) : (
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setLlmConfigDialog(prev => ({ ...prev, defaultModel: e.target.value }));
+                        }
+                      }}
+                      style={{ padding: '8px 10px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '12px', background: 'white', maxWidth: '150px' }}
+                    >
+                      <option value="">预设模型...</option>
+                      {providers.find(p => p.id === llmConfigDialog.providerId)?.models.map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
 
@@ -1181,7 +1266,7 @@ export default function SettingsPage() {
                   >
                     <option value="">-- 使用 LLM 供应商默认（{defaultLlmConfig ? defaultLlmConfig.default_model : '未配置'}）--</option>
                     {agentModelOptions.map(opt => (
-                      <option key={opt.configId} value={opt.value}>{opt.label}</option>
+                      <option key={opt.key} value={opt.value}>{opt.label}</option>
                     ))}
                   </select>
 

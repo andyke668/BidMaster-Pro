@@ -470,6 +470,7 @@ export const skillApi = {
 export const llmApi = {
   listProviders: () => api.get('/llm/providers'),
   testConnection: (config: Record<string, string>) => api.post('/llm/test', config),
+  fetchModels: (payload: Record<string, unknown>) => api.post('/llm/fetch-models', payload),
   getUsage: () => api.get('/llm/usage'),
   getDefaultModel: () => api.get('/llm/default-model'),
   listAgentModels: () => api.get('/llm/agent-models'),

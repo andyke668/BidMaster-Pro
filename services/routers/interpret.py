@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from services.database import get_db
 from services.models import Project, Document, Analysis, ProjectStatus
-from services.llm_factory import get_llm_gateway
+from services.llm_factory import get_agent_gateway
 
 router = APIRouter()
 
@@ -136,7 +136,7 @@ async def parse_tender_file(project_id: str, db: AsyncSession = Depends(get_db))
     project.status = ProjectStatus.INTERPRETING.value
     await db.flush()
 
-    detector = SectionDetector(llm_gateway=get_llm_gateway())
+    detector = SectionDetector(llm_gateway=await get_agent_gateway(db, "interpret"))
     sections = await detector.detect_async(parsed.text)
 
     return {
@@ -208,7 +208,7 @@ async def interpret_tender(project_id: str, db: AsyncSession = Depends(get_db)):
     from services.interpret.skills.tender_interpret_skill import TenderInterpretSkill
     from core.skill_engine.base import SkillContext
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "interpret")
     skill = TenderInterpretSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -264,7 +264,7 @@ async def build_scoring_matrix(project_id: str, db: AsyncSession = Depends(get_d
     from services.interpret.skills.scoring_matrix_skill import ScoringMatrixSkill
     from core.skill_engine.base import SkillContext
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "interpret")
     skill = ScoringMatrixSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -301,7 +301,7 @@ async def risk_alert(project_id: str, db: AsyncSession = Depends(get_db)):
 
     from services.interpret.skills.risk_alert_skill import RiskAlertSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "interpret")
     skill = RiskAlertSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -340,7 +340,7 @@ async def export_interpret(
 
     from services.interpret.skills.interpret_export_skill import InterpretExportSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "interpret")
     skill = InterpretExportSkill()
     ctx = SkillContext(
         project_id=project_id,

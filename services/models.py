@@ -389,6 +389,7 @@ class LLMProviderConfig(Base):
     api_key = Column(String(512), nullable=False)
     api_base = Column(String(512), nullable=True)
     default_model = Column(String(128), nullable=True)
+    models = Column(Text, nullable=True)
     is_default = Column(Boolean, default=False, nullable=False, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
     note = Column(String(256), nullable=True)

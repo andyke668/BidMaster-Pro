@@ -17,7 +17,7 @@ from services.models import (
     Project, Document, Analysis, Chapter, CheckReport,
     ProjectStatus, CheckType,
 )
-from services.llm_factory import get_llm_gateway
+from services.llm_factory import get_agent_gateway
 from core.skill_engine.base import SkillContext
 from core.task_manager import TaskManager
 from core.settings import get_settings
@@ -84,7 +84,7 @@ async def check_compliance(project_id: str, db: AsyncSession = Depends(get_db)):
 
     from services.check.skills.compliance_check_skill import ComplianceCheckSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = ComplianceCheckSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -136,7 +136,7 @@ async def check_disqualification(project_id: str, db: AsyncSession = Depends(get
 
     from services.check.skills.disqualification_check_skill import DisqualificationCheckSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = DisqualificationCheckSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -181,7 +181,7 @@ async def check_qualification(project_id: str, db: AsyncSession = Depends(get_db
     timeline = analysis.dimensions.get("timeline", {}) if analysis and analysis.dimensions else {}
     bid_deadline = timeline.get("投标截止日", "") if isinstance(timeline, dict) else ""
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = QualificationCheckSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -234,7 +234,7 @@ async def check_pricing(project_id: str, db: AsyncSession = Depends(get_db)):
 
     from services.check.skills.pricing_check_skill import PricingCheckSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = PricingCheckSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -275,7 +275,7 @@ async def check_fit_score(project_id: str, db: AsyncSession = Depends(get_db)):
 
     from services.check.skills.fit_score_skill import FitScoreSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = FitScoreSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -309,7 +309,7 @@ async def run_selfcheck(project_id: str, db: AsyncSession = Depends(get_db)):
     check_results = {}
 
     if tender_text and bid_text:
-        gateway = get_llm_gateway()
+        gateway = await get_agent_gateway(db, "check")
 
         # Extract max_price for pricing check
         analysis_result = await db.execute(
@@ -367,7 +367,7 @@ async def run_selfcheck(project_id: str, db: AsyncSession = Depends(get_db)):
     ctx = SkillContext(
         project_id=project_id,
         db=db,
-        llm=get_llm_gateway(),
+        llm=await get_agent_gateway(db, "check"),
         parameters={"check_results": check_results},
     )
     skill_result = await skill.safe_execute(ctx)
@@ -424,7 +424,7 @@ async def _do_full_check(project_id: str):
             if not tender_text or not bid_text:
                 raise ValueError("招标文件或投标文件内容为空")
 
-            gateway = get_llm_gateway()
+            gateway = await get_agent_gateway(db, "check")
 
             # Extract supplementary parameters
             analysis_result = await db.execute(
@@ -589,7 +589,7 @@ async def list_check_reports(project_id: str, db: AsyncSession = Depends(get_db)
 async def check_deposit(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.deposit_check_skill import DepositCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = DepositCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -850,7 +850,7 @@ async def _do_single_check(project_id: str, check_type: str):
         if not tender_text or not bid_text:
             raise ValueError("招标文件或投标文件内容为空")
 
-        gateway = get_llm_gateway()
+        gateway = await get_agent_gateway(db, "check")
 
         # --- selfcheck: 3 sub-skills in parallel + summary skill ---
         if check_type == "selfcheck":
@@ -1017,7 +1017,7 @@ async def upload_and_check(
     if tender_file:
         tender_text = await _parse_uploaded_file(tender_file)
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
 
     if check_type == "fullCheck":
         all_results: dict = {}
@@ -1120,7 +1120,7 @@ async def upload_and_check(
 async def check_signature(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.signature_check_skill import SignatureCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = SignatureCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1135,7 +1135,7 @@ async def check_signature(project_id: str, db: AsyncSession = Depends(get_db)):
 async def check_validity(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.validity_check_skill import ValidityCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = ValidityCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1150,7 +1150,7 @@ async def check_validity(project_id: str, db: AsyncSession = Depends(get_db)):
 async def check_consistency(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.consistency_check_skill import ConsistencyCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = ConsistencyCheckSkill()
 
     # Build project_facts from analysis data for rule-based consistency checks
@@ -1178,7 +1178,7 @@ async def check_consistency(project_id: str, db: AsyncSession = Depends(get_db))
 async def check_duplicate(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.duplicate_check_skill import DuplicateCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = DuplicateCheckSkill()
 
     # Build reference_texts from other projects' bid documents for cross-project dedup
@@ -1211,7 +1211,7 @@ async def check_mandatory_req(project_id: str, db: AsyncSession = Depends(get_db
     if not tender_text or not bid_text:
         raise HTTPException(status_code=400, detail="招标文件或投标文件内容为空")
     from services.check.skills.mandatory_req_check_skill import MandatoryReqCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = MandatoryReqCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1241,9 +1241,9 @@ async def export_check_report(
     project_name = project.name if project else "未命名项目"
 
     from services.check.skills.check_report_export_skill import CheckReportExportSkill
-    from services.llm_factory import get_llm_gateway
+    from services.llm_factory import get_agent_gateway
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = CheckReportExportSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -1274,7 +1274,7 @@ async def get_check_report_content(
 ):
     """直接返回报告内容(用于前端预览)，不触发下载。"""
     from services.check.skills.check_report_export_skill import CheckReportExportSkill
-    from services.llm_factory import get_llm_gateway
+    from services.llm_factory import get_agent_gateway
 
     result = await db.execute(select(CheckReport).where(CheckReport.id == report_id))
     report = result.scalar_one_or_none()
@@ -1295,7 +1295,7 @@ async def get_check_report_content(
             "size": 0,
         }
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = CheckReportExportSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -1327,7 +1327,7 @@ async def get_check_report_content(
 async def check_doc_integrity(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.doc_integrity_check_skill import DocIntegrityCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = DocIntegrityCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1342,7 +1342,7 @@ async def check_doc_integrity(project_id: str, db: AsyncSession = Depends(get_db
 async def check_ai_text(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.ai_text_check_skill import AITextCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = AITextCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1363,7 +1363,7 @@ async def check_risk_score(project_id: str, db: AsyncSession = Depends(get_db)):
     check_results = {r.type.value if isinstance(r.type, CheckType) else str(r.type): r.results for r in reports}
     from services.check.skills.risk_score_skill import RiskScoreSkill
     skill = RiskScoreSkill()
-    ctx = SkillContext(project_id=project_id, db=db, llm=get_llm_gateway(), parameters={"check_results": check_results})
+    ctx = SkillContext(project_id=project_id, db=db, llm=await get_agent_gateway(db, "check"), parameters={"check_results": check_results})
     skill_result = await skill.safe_execute(ctx)
     if skill_result.success:
         report = CheckReport(
@@ -1382,7 +1382,7 @@ async def check_risk_score(project_id: str, db: AsyncSession = Depends(get_db)):
 async def check_cross(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.cross_check_skill import CrossCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = CrossCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1397,7 +1397,7 @@ async def check_cross(project_id: str, db: AsyncSession = Depends(get_db)):
 async def check_sample_report(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.sample_report_check_skill import SampleReportCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = SampleReportCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1412,7 +1412,7 @@ async def check_sample_report(project_id: str, db: AsyncSession = Depends(get_db
 async def check_joint_bid(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.joint_bid_check_skill import JointBidCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = JointBidCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1427,7 +1427,7 @@ async def check_joint_bid(project_id: str, db: AsyncSession = Depends(get_db)):
 async def check_ebid_submit(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.ebid_submit_check_skill import EbidSubmitCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = EbidSubmitCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)
@@ -1442,7 +1442,7 @@ async def check_ebid_submit(project_id: str, db: AsyncSession = Depends(get_db))
 async def check_pricing_logic(project_id: str, db: AsyncSession = Depends(get_db)):
     project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
     from services.check.skills.pricing_logic_check_skill import PricingLogicCheckSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "check")
     skill = PricingLogicCheckSkill()
     ctx = SkillContext(project_id=project_id, db=db, llm=gateway, parameters={"tender_text": tender_text, "bid_text": bid_text})
     skill_result = await skill.safe_execute(ctx)

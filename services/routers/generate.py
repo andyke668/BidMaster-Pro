@@ -19,7 +19,7 @@ from sqlalchemy import select
 
 from services.database import get_db
 from services.models import Project, Document, Analysis, Outline, Chapter, ProjectStatus
-from services.llm_factory import get_llm_gateway
+from services.llm_factory import get_agent_gateway
 from core.skill_engine.base import SkillContext
 from core.task_manager import TaskManager
 
@@ -84,7 +84,7 @@ async def _do_generate_outline(project_id: str, mode: str):
 
             from services.generate.skills.outline_gen_skill import OutlineGenSkill
 
-            gateway = get_llm_gateway()
+            gateway = await get_agent_gateway(db, "outline")
 
             structure_sections = []
             if project.config and isinstance(project.config, dict):
@@ -226,7 +226,7 @@ async def _do_generate_structure(project_id: str, structure_type: str):
 
             from services.generate.skills.structure_template_skill import StructureTemplateSkill
 
-            gateway = get_llm_gateway()
+            gateway = await get_agent_gateway(db, "outline")
             skill = StructureTemplateSkill()
             ctx = SkillContext(
                 project_id=project_id,
@@ -291,7 +291,7 @@ async def _do_score_coverage(project_id: str):
 
             from services.generate.skills.structure_template_skill import ScoreCoverageSkill
 
-            gateway = get_llm_gateway()
+            gateway = await get_agent_gateway(db, "outline")
             skill = ScoreCoverageSkill()
             ctx = SkillContext(
                 project_id=project_id,
@@ -334,7 +334,7 @@ async def _do_mandatory_extract(project_id: str):
 
             from services.generate.skills.mandatory_req_extract_skill import MandatoryReqExtractSkill
 
-            gateway = get_llm_gateway()
+            gateway = await get_agent_gateway(db, "outline")
             skill = MandatoryReqExtractSkill()
             ctx = SkillContext(
                 project_id=project_id,
@@ -665,7 +665,7 @@ async def generate_chapter(
 
     from services.generate.skills.content_gen_skill import ContentGenSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "content")
     skill = ContentGenSkill()
     ctx = SkillContext(
         project_id=project_id,
@@ -878,7 +878,7 @@ async def stream_generate_chapter(
         "content": f'请撰写\u201c{chapter_title}\u201d章节的完整正文。',
     })
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "content")
 
     outline_id = outline.id if outline else None
 
@@ -1020,7 +1020,7 @@ async def stream_generate_all_chapters(
     analysis = analysis_result.scalar_one_or_none()
     mandatory_reqs = _extract_mandatory_requirements(analysis)
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "content")
 
     async def batch_event_generator():
         total = len(all_chapters)
@@ -1490,7 +1490,7 @@ async def export_docx(
             ctx = SkillContext(
                 project_id=project.id,
                 db=db,
-                llm=get_llm_gateway(),
+                llm=await get_agent_gateway(db, "export"),
                 parameters={
                     "file_path": str(docx_path),
                     "template": template,
@@ -1518,7 +1518,7 @@ async def export_docx(
             ctx = SkillContext(
                 project_id=project.id,
                 db=db,
-                llm=get_llm_gateway(),
+                llm=await get_agent_gateway(db, "export"),
                 parameters={
                     "input_path": str(docx_path),
                     "output_dir": str(export_root),

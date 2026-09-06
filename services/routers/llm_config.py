@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -177,8 +179,85 @@ async def list_providers():
         {"id": "siliconflow", "name": "硅基流动", "models": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-72B-Instruct", "Qwen/Qwen2.5-32B-Instruct", "THUDM/glm-4-9b-chat"]},
         {"id": "ollama", "name": "Ollama(本地)", "models": ["qwen2.5", "llama3.1", "mistral"]},
         {"id": "openai", "name": "OpenAI", "models": ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]},
+        {"id": "custom", "name": "自定义供应商（OpenAI 兼容）", "models": []},
     ]}
 
+
+class FetchModelsRequest(BaseModel):
+    api_base: str | None = None
+    api_key: str | None = None
+    config_id: str | None = None
+
+
+@router.post("/fetch-models")
+async def fetch_provider_models(payload: FetchModelsRequest, db: AsyncSession = Depends(get_db)):
+    """从 OpenAI 兼容网关拉取模型列表：GET {api_base}/models（Bearer 认证）。
+
+    提供 config_id 且未显式传 api_base/api_key 时，复用已保存配置（Key 不必经前端回传）。
+    """
+    import httpx
+
+    api_base = (payload.api_base or "").strip()
+    api_key = (payload.api_key or "").strip()
+    if payload.config_id:
+        result = await db.execute(select(LLMProviderConfig).where(LLMProviderConfig.id == payload.config_id))
+        cfg = result.scalar_one_or_none()
+        if not cfg:
+            raise HTTPException(status_code=404, detail="配置不存在")
+        api_base = api_base or (cfg.api_base or "").strip()
+        api_key = api_key or (cfg.api_key or "").strip()
+
+    if not api_base.startswith(("http://", "https://")):
+        return {"success": False, "error": "API Base 须以 http:// 或 https:// 开头"}
+
+    base = api_base.rstrip("/")
+    if base.endswith("/models"):
+        candidates = [base]
+    else:
+        candidates = [f"{base}/models"]
+        if not base.endswith("/v1"):
+            candidates.append(f"{base}/v1/models")
+
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    data = None
+    last_error = ""
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for url in candidates:
+                try:
+                    resp = await client.get(url, headers=headers)
+                except Exception as e:
+                    last_error = f"请求网关失败: {e}"
+                    continue
+                if resp.status_code == 404 and len(candidates) > 1:
+                    last_error = f"HTTP 404: {url}"
+                    continue
+                if resp.status_code != 200:
+                    return {"success": False, "error": f"网关返回 HTTP {resp.status_code}: {resp.text[:200]}"}
+                data = resp.json()
+                break
+    except Exception as e:
+        return {"success": False, "error": f"请求网关失败: {e}"}
+
+    if data is None:
+        return {"success": False, "error": last_error or "未能获取模型列表"}
+
+    items = data
+    if isinstance(data, dict):
+        items = data.get("data") or data.get("models") or []
+    models: list[str] = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                models.append(item.strip())
+            elif isinstance(item, dict):
+                mid = str(item.get("id") or item.get("name") or "").strip()
+                if mid:
+                    models.append(mid)
+    models = sorted(set(models))
+    if not models:
+        return {"success": False, "error": "网关未返回任何模型（需 OpenAI 兼容的 /models 响应格式）"}
+    return {"success": True, "models": models}
 
 @router.post("/test")
 async def test_connection(config: dict):
@@ -318,6 +397,15 @@ async def get_default_model(db: AsyncSession = Depends(get_db)):
     }
 
 
+def _parse_models(raw: str | None) -> list:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+        return [str(m) for m in data] if isinstance(data, list) else []
+    except Exception:
+        return []
+
 def _mask_key(k: str) -> str:
     if not k:
         return ""
@@ -347,6 +435,7 @@ async def list_llm_configs(db: AsyncSession = Depends(get_db)):
                 "is_default": bool(r.is_default),
                 "enabled": bool(r.enabled),
                 "note": r.note or "",
+                "models": _parse_models(r.models),
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "updated_at": r.updated_at.isoformat() if r.updated_at else None,
             }
@@ -373,12 +462,19 @@ class LLMConfigCreate(BaseModel):
     default_model: str | None = None
     enabled: bool = True
     note: str | None = None
+    models: list[str] | None = None
 
 
 @router.post("/configs")
 async def create_llm_config(payload: LLMConfigCreate, db: AsyncSession = Depends(get_db)):
     import re
-    if not re.match(r"^[A-Za-z0-9._\-]{1,64}$", payload.provider_id):
+    import uuid
+    provider_id = payload.provider_id.strip()
+    if provider_id == "custom":
+        if not (payload.api_base or "").strip():
+            raise HTTPException(status_code=400, detail="自定义供应商必须填写 API Base")
+        provider_id = f"custom_{uuid.uuid4().hex[:8]}"
+    if not re.match(r"^[A-Za-z0-9._\-]{1,64}$", provider_id):
         raise HTTPException(status_code=400, detail="供应商 ID 格式不合法")
     if not payload.api_key or len(payload.api_key) < 4:
         raise HTTPException(status_code=400, detail="API Key 不能为空")
@@ -386,19 +482,20 @@ async def create_llm_config(payload: LLMConfigCreate, db: AsyncSession = Depends
         raise HTTPException(status_code=400, detail="API Base 须以 http:// 或 https:// 开头")
 
     cfg = LLMProviderConfig(
-        provider_id=payload.provider_id,
+        provider_id=provider_id,
         display_name=payload.display_name,
         api_key=payload.api_key,
         api_base=payload.api_base,
         default_model=payload.default_model,
         enabled=payload.enabled,
         note=payload.note,
+        models=json.dumps(payload.models, ensure_ascii=False) if payload.models else None,
     )
     if cfg.enabled and not (await _any_default_exists(db)):
         cfg.is_default = True
     db.add(cfg)
     await db.flush()
-    return {"success": True, "id": cfg.id}
+    return {"success": True, "id": cfg.id, "provider_id": provider_id}
 
 
 class LLMConfigUpdate(BaseModel):
@@ -408,6 +505,7 @@ class LLMConfigUpdate(BaseModel):
     default_model: str | None = None
     enabled: bool | None = None
     note: str | None = None
+    models: list[str] | None = None
 
 
 @router.put("/configs/{config_id}")
@@ -430,6 +528,8 @@ async def update_llm_config(config_id: str, payload: LLMConfigUpdate, db: AsyncS
         cfg.enabled = payload.enabled
     if payload.note is not None:
         cfg.note = payload.note
+    if payload.models is not None:
+        cfg.models = json.dumps(payload.models, ensure_ascii=False)
     await db.flush()
     return {"success": True}
 

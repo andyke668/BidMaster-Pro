@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.settings import get_settings
 from services.database import get_db
-from services.llm_factory import get_llm_gateway
+from services.llm_factory import get_agent_gateway
 from core.skill_engine.base import SkillContext
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ async def format_document(
 
     from services.format.skills.docx_format_skill import DocxFormatSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "format")
     skill = DocxFormatSkill()
     ctx = SkillContext(
         project_id="",
@@ -96,7 +96,7 @@ async def check_format(
 
     from services.format.skills.docx_format_skill import DocxFormatSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "format")
     skill = DocxFormatSkill()
     ctx = SkillContext(
         project_id="",
@@ -125,7 +125,7 @@ async def diff_format(
 
     from services.format.skills.docx_format_skill import DocxFormatSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "format")
     skill = DocxFormatSkill()
     ctx = SkillContext(
         project_id="",
@@ -153,7 +153,7 @@ async def beautify_document(
 
     from services.format.skills.docx_format_skill import DocxFormatSkill
 
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "format")
     skill = DocxFormatSkill()
     ctx = SkillContext(
         project_id="",
@@ -235,7 +235,7 @@ async def export_to_pdf(
             docx_to_send = formatted
 
     from services.format.skills.pdf_export_skill import PdfExportSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "format")
     skill = PdfExportSkill()
     out_dir = docx_to_send.parent
     ctx = SkillContext(
@@ -298,7 +298,7 @@ async def export_formatted_docx(
 
 async def _run_format_skill(src: Path, template: str, db: AsyncSession) -> Path | None:
     from services.format.skills.docx_format_skill import DocxFormatSkill
-    gateway = get_llm_gateway()
+    gateway = await get_agent_gateway(db, "format")
     skill = DocxFormatSkill()
     ctx = SkillContext(
         project_id="",
@@ -400,8 +400,8 @@ async def format_from_project(
     src_path = output_dir / f"{safe_name}_src_{project_id[:8]}.docx"
     doc.save(str(src_path))
 
-    from services.llm_factory import get_llm_gateway
-    gateway = get_llm_gateway()
+    from services.llm_factory import get_agent_gateway
+    gateway = await get_agent_gateway(db, "format")
     skill = DocxFormatSkill()
 
     ctx = SkillContext(
