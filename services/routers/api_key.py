@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database import get_db
 from services.models import ApiKey, ApiKeyUsage
+def _naive_utc():
+    """部署补丁：与 models.py 一致，写入 naive UTC（列为 TIMESTAMP WITHOUT TIME ZONE）"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 from services.middleware.api_key import _hash_key
 from services.middleware.rbac_middleware import require_permission
 
@@ -105,7 +109,7 @@ async def issue_api_key(
     key_hash = _hash_key(raw)
     prefix = _build_prefix(raw)
 
-    expires_at = datetime.now(timezone.utc) + timedelta(days=req.ttl_days)
+    expires_at = _naive_utc() + timedelta(days=req.ttl_days)
     api_key = ApiKey(
         key_hash=key_hash,
         key_prefix=prefix,
@@ -200,7 +204,7 @@ async def update_api_key(
     if req.expires_at is not None:
         updates["expires_at"] = req.expires_at
     if updates:
-        updates["updated_at"] = datetime.now(timezone.utc)
+        updates["updated_at"] = _naive_utc()
         await db.execute(update(ApiKey).where(ApiKey.id == api_key_id).values(**updates))
         await db.flush()
 
@@ -222,7 +226,7 @@ async def revoke_api_key(
     await db.execute(
         update(ApiKey)
         .where(ApiKey.id == api_key_id)
-        .values(enabled=False, updated_at=datetime.now(timezone.utc))
+        .values(enabled=False, updated_at=_naive_utc())
     )
     await db.flush()
     logger.info(f"撤销 API Key: {api_key.key_prefix}")
@@ -252,7 +256,7 @@ async def recharge_credits(
         .values(
             credits_remaining=new_remaining,
             credits_total=new_total,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=_naive_utc(),
         )
     )
     await db.flush()
@@ -277,7 +281,7 @@ async def get_usage_stats(
     if not api_key:
         raise HTTPException(status_code=404, detail="API Key 不存在")
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    since = _naive_utc() - timedelta(days=days)
     # 总调用数 + 总 credits 消耗
     summary_result = await db.execute(
         select(
