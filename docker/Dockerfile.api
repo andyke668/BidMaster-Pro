@@ -53,7 +53,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #   libpango-1.0-0 libpangoft2-1.0-0 libcairo2 libgdk-pixbuf-xlib-2.0-0 — weasyprint
 #   curl                — healthcheck
 #   tzdata              — 时区
-#   antiword            — 老式 .doc（Word 97-2003 二进制）文本提取
+#   antiword/catdoc     — 老式 .doc（Word 97-2003 二进制）文本提取，catdoc 兜底 WPS 变体
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         libjpeg62-turbo \
@@ -66,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         tzdata \
         antiword \
+        catdoc \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && rm -rf /var/lib/apt/lists/*
 
