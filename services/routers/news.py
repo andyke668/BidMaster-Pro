@@ -571,13 +571,25 @@ async def list_sources(
 
 
 @router.post("/sources/sync")
-async def sync_sources(db: AsyncSession = Depends(get_db)):
+async def sync_sources(
+    force_enabled: bool = Query(
+        False,
+        description="把 YAML 的 enabled 下发到已有源（批量启停预置源时用；会覆盖 UI 手动开关）",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
     """3) 重新同步 YAML -> DB (管理员手动触发)"""
     from services.news.source_registry import sync_sources_to_db, reload_sources_yaml
     reload_sources_yaml()
-    synced = await sync_sources_to_db(db)
+    synced = await sync_sources_to_db(db, force_enabled=force_enabled)
     await db.commit()
-    return {"success": True, "synced": synced, "message": f"已同步 {synced} 个新源"}
+    return {
+        "success": True,
+        "synced": synced,
+        "force_enabled": force_enabled,
+        "message": f"已同步 {synced} 个新源"
+        + ("，并按 YAML 对齐了启用状态" if force_enabled else ""),
+    }
 
 
 class SourceToggle(BaseModel):

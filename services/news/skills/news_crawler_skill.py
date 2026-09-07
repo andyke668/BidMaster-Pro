@@ -7,6 +7,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import urljoin
 
 from core.skill_engine.base import Skill, SkillContext, SkillResult
 
@@ -172,15 +173,10 @@ class NewsCrawlerSkill(Skill):
         return text
 
     def _resolve_url(self, base: str, href: str) -> str:
-        if href.startswith('http'):
-            return href
-        if href.startswith('//'):
-            return 'https:' + href
-        if href.startswith('/'):
-            from urllib.parse import urlparse
-            parsed = urlparse(base)
-            return f"{parsed.scheme}://{parsed.netloc}{href}"
-        return f"{base.rstrip('/')}/{href.lstrip('/')}"
+        # 统一交给 urljoin：ccgp 列表页的 href 形如 "./202609/t2026...htm"，
+        # 原来手拼 base + href 会得到 ".../zbgg/./202609/..." 这种带 /./ 的脏 URL，
+        # 入库后与 HTMLFetcher 用 urljoin 生成的同一篇公告 URL 不相等，去重会失效。
+        return urljoin(base, href)
 
     def _filter_results(
         self, results: list[dict], keywords: str, exclude: str, must_contain: str
@@ -211,12 +207,22 @@ class NewsCrawlerSkill(Skill):
         return filtered
 
     def _get_default_sites(self) -> list[str]:
+        """监控任务未显式配置 sites 时的兜底站点清单。
+
+        2026-09-07 实测原来那 5 个站点全部失效：chinabidding / bidlink 是纯前端渲染
+        （解析出 0 条），bidcenter 只能抓到「添加到收藏夹」这类导航垃圾，
+        cebpubservice 首页是政策新闻而非公告列表，ccgp 汇总页 /cggg/zygg/ 的 <a>
+        文本只有频道名（4 个字）会被长度下限过滤掉 —— 合计 0 条有效数据。
+
+        换成 ccgp 的分类频道列表页：<a> 文本即完整公告标题，实测每页稳定 20 条当日
+        数据且详情页能抽到正文。只放 3 个频道而不是 5 个，因为本 skill 会对每条结果
+        追一次详情页（20 条/站），站点数直接决定 /refresh-hot 的耗时。
+        与 services/news/sources.yaml 的启用源保持一致。
+        """
         return [
-            "https://www.chinabidding.cn/search/proj",
-            "https://bulletin.cebpubservice.com/",
-            "https://www.ccgp.gov.cn/cggg/zygg/",
-            "https://www.bidcenter.com.cn/search",
-            "https://www.bidlink.cn/search",
+            "http://www.ccgp.gov.cn/cggg/zygg/zbgg/",  # 中央招标公告
+            "http://www.ccgp.gov.cn/cggg/zygg/xjgg/",  # 中央询价公告
+            "http://www.ccgp.gov.cn/cggg/dfgg/zbgg/",  # 地方招标公告
         ]
 
 

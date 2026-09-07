@@ -12,14 +12,44 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 from datetime import datetime, timedelta
+from urllib.parse import urljoin
 import asyncio
+import re
 import requests
 import feedparser
+from bs4 import BeautifulSoup
 
 # 注意：requests 是同步库。单 worker + asyncio 部署下，直接在协程里调用会把
 # 整条事件循环阻塞住（聚合期间全站无响应，其它接口的轮询也会一起卡死），
 # 上层 asyncio.Semaphore(4) 的并发也形同虚设。
 # 因此本文件所有 requests.get 一律用 asyncio.to_thread 放进线程池执行。
+
+# 政务/招标站点普遍对非浏览器 UA 返回空页或 403，列表页抓取统一用浏览器 UA。
+_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+
+
+def _normalize_pub_date(raw: str) -> str:
+    """把抓到的日期串归一成 ISO 格式。
+
+    scoring._freshness 用 datetime.fromisoformat 解析 pub_date，
+    而各站点写法五花八门（2026年09月07日 / 2026/9/7 / 2026.09.07），
+    统一转换后才能正确算出时效性得分。
+    """
+    if not raw:
+        return ""
+    s = raw.strip()
+    for a, b in (("年", "-"), ("月", "-"), ("日", ""), ("/", "-"), (".", "-")):
+        s = s.replace(a, b)
+    s = re.sub(r"\s+", " ", s).strip().rstrip("-")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).isoformat()
+        except ValueError:
+            continue
+    return raw.strip()
 
 
 @dataclass
@@ -32,6 +62,14 @@ class NewsItem:
     content: str = ""
     source_code: str = ""
     industry_code: str = ""
+    # 以下字段是 scoring.BusinessValueScorer 与 HotspotItem 落库真正消费的：
+    # region 占评分 15%、amount 占 20%，owner_org/project_code 参与去重指纹。
+    # 之前 dataclass 里没有它们，抓取器即使拿到也传不到下游，导致地域分恒为 0。
+    region: str = ""
+    owner_org: str = ""
+    project_code: str = ""
+    bid_deadline: str = ""
+    amount: float = 0.0
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -142,7 +180,6 @@ class RSSFetcher(BaseFetcher):
             return fallback
 
         # 借鉴 NewsCrawlerSkill 的 EXTRACT_PATTERNS
-        import re
         extract_patterns = [
             r'<article[^>]*>(.*?)</article>',
             r'<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)</div>',
@@ -257,11 +294,151 @@ class APIFetcher(BaseFetcher):
 
 
 class HTMLFetcher(BaseFetcher):
-    """HTML 抓取器 (预留扩展,默认走 NewsCrawlerSkill)"""
+    """HTML 列表页抓取器（配置驱动）
+
+    国内招标采购站点绝大多数没有 RSS，只提供列表页。抓取规则全部写在
+    sources.yaml 的 config 里，本类只做通用执行——新增站点不用改代码：
+
+      item_selector   列表项 CSS 选择器（必填），如 "ul.c_list_bid > li"；
+                      soupsieve 支持 :has()，可用 "li:has(div.xxx)" 定位
+      link_selector   条目内链接选择器，默认 "a"
+      base_url        相对链接的基准 URL，默认取源自身的 url
+      encoding        强制编码；缺省时若服务端未声明 charset（requests 会退到
+                      iso-8859-1，中文必乱码）则用 apparent_encoding 探测
+      date_pattern    含 1 个捕获组的正则，从条目文本提取发布时间
+      field_patterns  {字段名: 正则}，从条目文本提取 region / owner_org /
+                      project_code / bid_deadline，直接喂给评分与落库
+      max_items       单源最多条目数，默认 30
+      min_title_len   标题最小长度，用于滤掉「更多」「首页」等导航短链接，默认 10
+
+    只抓列表页、不追详情页：招标列表的标题+地域+采购人已足够评分与去重，
+    而逐条追详情会让单源多出几十次请求，把整个聚合拖到分钟级以上。
+    """
+
+    DEFAULT_MAX_ITEMS = 30
+    DEFAULT_MIN_TITLE_LEN = 10
+    SKIP_HREF_PREFIXES = ("javascript:", "#", "mailto:", "tel:")
+
+    def __init__(self, max_age_hours: int = 168):
+        self.max_age_hours = max_age_hours
 
     async def fetch(self, source_config: dict) -> List[NewsItem]:
-        # HTML 抓取维持原有 NewsCrawlerSkill 流程,这里不重复实现
-        return []
+        url = source_config.get("url", "")
+        if not url:
+            return []
+
+        cfg = source_config.get("config") or source_config.get("extra_config") or {}
+        item_selector = cfg.get("item_selector")
+        if not item_selector:
+            raise FetchError(f"HTML 源缺少 config.item_selector，无法解析: {url}")
+
+        try:
+            resp = await asyncio.to_thread(
+                requests.get,
+                url,
+                timeout=20,
+                headers={"User-Agent": _BROWSER_UA},
+            )
+            resp.raise_for_status()
+        except requests.exceptions.Timeout:
+            raise FetchError(f"HTML 抓取超时: {url}")
+        except requests.exceptions.RequestException as e:
+            raise FetchError(f"HTML 抓取失败: {e}")
+
+        encoding = cfg.get("encoding")
+        if encoding:
+            resp.encoding = encoding
+        elif not resp.encoding or resp.encoding.lower().startswith("iso-8859"):
+            resp.encoding = resp.apparent_encoding
+
+        html = resp.text
+
+        def _select() -> list:
+            return BeautifulSoup(html, "html.parser").select(item_selector)
+
+        try:
+            # 解析大页面是 CPU 活，同样丢线程池，别堵事件循环
+            nodes = await asyncio.to_thread(_select)
+        except Exception as e:
+            raise FetchError(f"HTML 解析失败 (item_selector={item_selector}): {e}")
+
+        base_url = cfg.get("base_url") or url
+        link_selector = cfg.get("link_selector", "a")
+        date_pattern = cfg.get("date_pattern")
+        max_items = int(cfg.get("max_items", self.DEFAULT_MAX_ITEMS))
+        min_title_len = int(cfg.get("min_title_len", self.DEFAULT_MIN_TITLE_LEN))
+        cutoff = datetime.now() - timedelta(hours=self.max_age_hours)
+
+        compiled_fields: dict = {}
+        for fname, pattern in (cfg.get("field_patterns") or {}).items():
+            try:
+                compiled_fields[fname] = re.compile(pattern)
+            except re.error as e:
+                raise FetchError(f"config.field_patterns.{fname} 正则非法: {e}")
+
+        if date_pattern:
+            try:
+                date_re = re.compile(date_pattern)
+            except re.error as e:
+                raise FetchError(f"config.date_pattern 正则非法: {e}")
+        else:
+            date_re = None
+
+        items: List[NewsItem] = []
+        for node in nodes:
+            if len(items) >= max_items:
+                break
+
+            link = node.select_one(link_selector)
+            if not link or not link.get("href"):
+                continue
+            # 列表页 <a> 的可见文本常被 CSS 截断，title 属性才是完整标题
+            title = (link.get("title") or link.get_text(strip=True) or "").strip()
+            if len(title) < min_title_len:
+                continue
+            href = link["href"].strip()
+            if href.lower().startswith(self.SKIP_HREF_PREFIXES):
+                continue
+
+            text = node.get_text(" ", strip=True)
+
+            pub_date = ""
+            if date_re:
+                m = date_re.search(text)
+                if m:
+                    pub_date = _normalize_pub_date(m.group(1))
+            if pub_date:
+                try:
+                    if datetime.fromisoformat(pub_date) < cutoff:
+                        continue
+                except ValueError:
+                    pass
+
+            extracted: dict = {}
+            for fname, pattern in compiled_fields.items():
+                m = pattern.search(text)
+                if m:
+                    value = m.group(1).strip()
+                    if value:
+                        extracted[fname] = value
+
+            items.append(
+                NewsItem(
+                    title=title,
+                    url=urljoin(base_url, href),
+                    source=source_config.get("name", ""),
+                    pub_date=pub_date,
+                    content=text[:500],
+                    source_code=source_config.get("code", ""),
+                    industry_code=source_config.get("industry", ""),
+                    region=extracted.pop("region", ""),
+                    owner_org=extracted.pop("owner_org", ""),
+                    project_code=extracted.pop("project_code", ""),
+                    bid_deadline=extracted.pop("bid_deadline", ""),
+                    extra={"fetch_type": "html", **extracted},
+                )
+            )
+        return items
 
 
 class BrowserFetcher(BaseFetcher):

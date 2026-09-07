@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import logging
 import yaml
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,8 @@ from sqlalchemy import select
 
 from services.models import NewsSourceRegistry
 
+
+logger = logging.getLogger(__name__)
 
 _YAML_PATH = Path(__file__).parent / "sources.yaml"
 _yaml_cache: Optional[dict] = None
@@ -74,11 +77,18 @@ def get_source_by_code(code: str) -> Optional[dict]:
     return None
 
 
-async def sync_sources_to_db(db: AsyncSession) -> int:
+async def sync_sources_to_db(db: AsyncSession, force_enabled: bool = False) -> int:
     """启动时同步 YAML -> 数据库 (幂等)
 
     已有源只更新 name/weight/description/type/url 等基础信息,
     enabled 状态以数据库为准 (保留管理员的手动配置)。
+
+    force_enabled=True 时额外把 YAML 的 enabled 下发到已有行 —— 用于
+    预置源清单调整（如批量停用失效源）后一次性对齐，平时启动不要开，
+    否则会覆盖管理员在 UI 里的手动开关。
+
+    YAML 里已删除的源会在 DB 中被停用（保留行以留存抓取历史），
+    否则它们会永远留在 enabled=true 状态、每次聚合都报一次错。
     """
     yaml_data = load_sources_yaml()
     synced = 0
@@ -121,6 +131,31 @@ async def sync_sources_to_db(db: AsyncSession) -> int:
                 row.description = src.get("description", row.description)
                 if src.get("config"):
                     row.extra_config = src["config"]
+                if force_enabled:
+                    row.enabled = bool(src.get("enabled", True))
+
+    # 清理：YAML 中已移除的源 -> DB 停用
+    yaml_codes = {
+        src.get("code")
+        for sources in yaml_data.values()
+        if isinstance(sources, list)
+        for src in sources
+        if src.get("code")
+    }
+    enabled_rows = (
+        await db.execute(
+            select(NewsSourceRegistry).where(NewsSourceRegistry.enabled == True)  # noqa: E712
+        )
+    ).scalars().all()
+    pruned = []
+    for row in enabled_rows:
+        if row.code not in yaml_codes:
+            row.enabled = False
+            pruned.append(row.code)
+    if pruned:
+        logger.info(
+            f"[source_registry] YAML 已移除，自动停用 {len(pruned)} 个源: {pruned}"
+        )
 
     await db.flush()
     return synced
