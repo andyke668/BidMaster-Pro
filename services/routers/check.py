@@ -1119,6 +1119,7 @@ async def tender_bid_review(
     task = await tm.submit(
         "tender_bid_review",
         _do_tender_bid_review,
+        task.task_id,
         tender_text,
         bid_text,
         company_name,
@@ -1138,6 +1139,7 @@ async def tender_bid_review(
 
 
 async def _do_tender_bid_review(
+    task_id: str,
     tender_text: str,
     bid_text: str,
     company_name: str,
@@ -1159,7 +1161,7 @@ async def _do_tender_bid_review(
             llm=gateway,
             progress_callback=functools.partial(
                 _report_review_progress,
-                task.task_id,
+                task_id,
             ),
             parameters={
                 "tender_lines": tender_text,
