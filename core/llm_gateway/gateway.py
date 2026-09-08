@@ -199,6 +199,7 @@ class LLMGateway:
         temperature: float = 0.3,
         max_repair_attempts: int = 2,
         max_tokens: int | None = None,
+        extra_body: dict | None = None,
     ) -> dict:
         """调用 LLM 获取 JSON 响应，带修复和校验。
 
@@ -226,6 +227,7 @@ class LLMGateway:
                     temperature=temperature,
                     response_format={"type": "json_object"},
                     max_tokens=max_tokens,
+                    extra_body=extra_body,
                 )
 
                 # 处理流式响应
