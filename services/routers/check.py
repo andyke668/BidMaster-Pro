@@ -1118,10 +1118,10 @@ async def tender_bid_review(
 
     tm = TaskManager.instance()
     review_task_id = str(uuid.uuid4())
-    logger.warning("TENDER_REVIEW_DEBUG submit=%s fn=%s args=%s", tm.submit, _do_tender_bid_review, (tender_text, bid_text, company_name, school_name, bid_filename, tender_filename))
     task = await tm.submit(
         "tender_bid_review",
         _do_tender_bid_review,
+        review_task_id,
         tender_text,
         bid_text,
         company_name,
