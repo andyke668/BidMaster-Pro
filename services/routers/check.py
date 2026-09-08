@@ -1119,13 +1119,13 @@ async def tender_bid_review(
     task = await tm.submit(
         "tender_bid_review",
         _do_tender_bid_review,
-        task.task_id,
         tender_text,
         bid_text,
         company_name,
         school_name,
         bid_filename,
         tender_filename,
+        task_id=task.task_id,
     )
 
     return {

@@ -71,8 +71,8 @@ class TaskManager:
             cls._instance = cls()
         return cls._instance
 
-    def create_task(self, task_type: str) -> AsyncTask:
-        task = AsyncTask(task_id=str(uuid.uuid4()), task_type=task_type)
+    def create_task(self, task_type: str, task_id: str | None = None) -> AsyncTask:
+        task = AsyncTask(task_id=task_id or str(uuid.uuid4()), task_type=task_type)
         self._tasks[task.task_id] = task
         logger.info(f"[TaskManager] 创建任务 task_id={task.task_id}, type={task_type}")
         return task
@@ -92,6 +92,7 @@ class TaskManager:
         task_type: str,
         coro_fn: Callable[..., Coroutine],
         *args,
+        task_id: str | None = None,
         **kwargs,
     ) -> AsyncTask:
         """提交异步任务并立即返回 task_id。
@@ -101,7 +102,7 @@ class TaskManager:
             coro_fn: 异步函数
             *args, **kwargs: 传给 coro_fn 的参数
         """
-        task = self.create_task(task_type)
+        task = self.create_task(task_type, task_id)
 
         async def _run():
             task.status = TaskStatus.RUNNING
