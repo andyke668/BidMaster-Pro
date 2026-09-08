@@ -1,6 +1,6 @@
 [project]
 name = "bidmaster-pro"
-version = "0.1.0"
+version = "0.2.0"
 description = "BidMaster Pro - 全流程智能招投标平台"
 requires-python = ">=3.12"
 readme = "README.md"

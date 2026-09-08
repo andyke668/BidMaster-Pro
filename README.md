@@ -2,13 +2,13 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 
 **AI 智能招投标助手 · 标书生成 · 投标生成 · 投标检查 · 文档排版 全流程自动化**
 
-[功能特性](#功能特性) • [界面预览](#界面预览) • [技术架构](#技术架构) • [快速开始](#快速开始) • [项目结构](#项目结构) • [联系作者](#-联系作者)
+[功能特性](#功能特性) • [界面预览](#界面预览) • [技术架构](#技术架构) • [快速开始](#快速开始) • [项目结构](#项目结构) • [更新日志](#-更新日志) • [联系作者](#-联系作者)
 
 [![联系作者](https://img.shields.io/badge/💬_联系作者-公众号回复_bidmaster-07C160?style=for-the-badge)](#-联系作者)
 
@@ -353,6 +353,12 @@ if not gate_keeper.is_passed(project_id, "interpret"):
 ```
 
 ---
+
+## 📝 更新日志
+
+当前版本 **v0.2.0**（2026-09-08）。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
+
+> 本仓库 fork 自 [guangshu100/BidMaster-Pro](https://github.com/guangshu100/BidMaster-Pro)。`v0.2.0` 起的全部改动均为本 fork 自研，且已在内网 Docker Compose 环境（postgres + api + web）实际部署并逐项验证；其中**包含破坏性接口变更**（`upload-check` 与 AI 解读改为「提交任务 + 轮询」、生产 `UVICORN_WORKERS` 必须为 1），升级前请先读 CHANGELOG 的「破坏性变更」一节。
 
 ## 💬 联系作者
 
