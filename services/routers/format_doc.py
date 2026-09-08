@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.http_headers import content_disposition
 from core.settings import get_settings
 from services.database import get_db
 from services.llm_factory import get_agent_gateway
@@ -214,7 +215,7 @@ async def export_to_doc(
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/msword",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers=content_disposition(filename),
     )
 
 
@@ -269,7 +270,7 @@ async def export_to_pdf(
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers=content_disposition(filename),
     )
 
 
@@ -292,7 +293,7 @@ async def export_formatted_docx(
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+        headers=content_disposition(filename),
     )
 
 
@@ -511,5 +512,5 @@ async def download_formatted_file(path: str):
     return StreamingResponse(
         p.open("rb"),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{p.name}"},
+        headers=content_disposition(p.name),
     )

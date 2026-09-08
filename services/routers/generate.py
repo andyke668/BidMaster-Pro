@@ -6,7 +6,6 @@ import logging
 import re
 import time
 from pathlib import Path
-from urllib.parse import quote
 
 import io
 
@@ -21,6 +20,7 @@ from sqlalchemy import select
 from services.database import get_db
 from services.models import Project, Document, Analysis, Outline, Chapter, ProjectStatus
 from services.llm_factory import get_agent_gateway
+from core.http_headers import content_disposition
 from core.skill_engine.base import SkillContext
 from core.task_manager import TaskManager
 
@@ -1480,7 +1480,6 @@ async def export_docx(
     export_root = Path("./uploads/exports")
     export_root.mkdir(parents=True, exist_ok=True)
     safe_name = re.sub(r'[\\/:*?"<>|]', "_", project.name)[:80] or "project"
-    quoted_name = quote(safe_name)
     base_path = export_root / f"{safe_name}_{int(time.time())}"
     docx_path = base_path.with_suffix(".docx")
     docx_path.write_bytes(buffer.getvalue())
@@ -1508,10 +1507,14 @@ async def export_docx(
 
         if fmt == "docx":
             data = docx_path.read_bytes()
+            try:
+                docx_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             return StreamingResponse(
                 io.BytesIO(data),
                 media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted_name}.docx"},
+                headers=content_disposition(f"{safe_name}.docx"),
             )
 
         if fmt == "pdf":
@@ -1539,7 +1542,7 @@ async def export_docx(
             return StreamingResponse(
                 io.BytesIO(data),
                 media_type="application/pdf",
-                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted_name}.pdf"},
+                headers=content_disposition(f"{safe_name}.pdf"),
             )
 
         if fmt == "doc":
@@ -1558,7 +1561,7 @@ async def export_docx(
             return StreamingResponse(
                 io.BytesIO(data),
                 media_type="application/msword",
-                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quoted_name}.doc"},
+                headers=content_disposition(f"{safe_name}.doc"),
             )
     except HTTPException:
         try:
