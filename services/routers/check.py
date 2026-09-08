@@ -1090,6 +1090,175 @@ async def submit_single_check(
     }
 
 
+
+@router.post("/tender-bid-review")
+async def tender_bid_review(
+    bid_file: UploadFile = File(..., description="投标书(.docx/.pdf/.txt)"),
+    tender_file: UploadFile = File(..., description="招标文件(.docx/.pdf/.txt)"),
+    company_name: str = Form("", description="投标方公司名称"),
+    school_name: str = Form("", description="招标方学校名称"),
+    db: AsyncSession = Depends(get_db),
+):
+    """投标文件审查：招标文件 + 投标书六维度交叉审查，返回异步任务ID。
+
+    任务完成后 task.result 包含 excel_base64 / file_name，前端可直接下载。
+    """
+    bid_text = await _parse_review_document(bid_file)
+    if not bid_text.strip():
+        raise HTTPException(status_code=400, detail="投标书内容为空或无法解析")
+
+    tender_text = await _parse_review_document(tender_file)
+    if not tender_text.strip():
+        raise HTTPException(status_code=400, detail="招标文件内容为空或无法解析")
+
+    bid_filename = bid_file.filename or "bid"
+    tender_filename = tender_file.filename if tender_file else None
+
+    tm = TaskManager.instance()
+    task = await tm.submit(
+        "tender_bid_review",
+        _do_tender_bid_review,
+        tender_text,
+        bid_text,
+        company_name,
+        school_name,
+        bid_filename,
+        tender_filename,
+    )
+
+    return {
+        "task_id": task.task_id,
+        "status": "pending",
+        "source": "upload",
+        "bid_filename": bid_filename,
+        "tender_filename": tender_filename,
+        "message": "投标文件审查任务已提交，请通过 GET /check/task/{task_id} 查询进度",
+    }
+
+
+async def _do_tender_bid_review(
+    tender_text: str,
+    bid_text: str,
+    company_name: str,
+    school_name: str,
+    bid_filename: str,
+    tender_filename: str | None,
+):
+    """后台执行投标文件审查并生成 Excel。必须自建 DB 会话。"""
+    from services.database import async_session
+    from services.check.skills.tender_bid_review_skill import TenderBidReviewSkill
+
+    session_factory = async_session()
+    async with session_factory() as skill_db:
+        gateway = await get_agent_gateway(skill_db, "check")
+        skill = TenderBidReviewSkill()
+        ctx = SkillContext(
+            project_id="",
+            db=skill_db,
+            llm=gateway,
+            parameters={
+                "tender_lines": tender_text,
+                "bid_lines": bid_text,
+                "company_name": company_name,
+                "school_name": school_name,
+            },
+        )
+        result = await skill.safe_execute(ctx)
+
+        response = {
+            "success": result.success,
+            "data": result.data,
+            "error": result.error,
+            "warnings": result.warnings,
+            "source": "upload",
+            "bid_filename": bid_filename,
+            "tender_filename": tender_filename,
+        }
+
+        if result.success and result.data.get("excel_base64"):
+            import base64
+            excel_bytes = base64.b64decode(result.data["excel_base64"])
+            file_name = result.data.get("file_name", "投标文件审查.xlsx")
+            import os
+            import tempfile
+            temp_dir = os.path.join(tempfile.gettempdir(), "bidmaster_exports")
+            os.makedirs(temp_dir, exist_ok=True)
+            safe_name = re.sub(r'[\\/:*?\"<>|]', '_', file_name).strip()
+            safe_name = re.sub(r'_+', '_', safe_name)
+            if not safe_name.endswith('.xlsx'):
+                safe_name += '.xlsx'
+            out_path = os.path.join(temp_dir, safe_name)
+            with open(out_path, "wb") as f:
+                f.write(excel_bytes)
+            response["data"]["download_url"] = f"/check/tender-bid-review/download/{safe_name}"
+            response["data"]["file_name"] = safe_name
+
+        return response
+
+
+async def _parse_review_document(file: UploadFile) -> str:
+    """使用统一文档引擎解析审查文件，保留行号锚点并拒绝空扫描件。"""
+    from core.doc_engine import get_parser
+
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    content_bytes = await file.read()
+    if len(content_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限")
+    if not suffix:
+        raise HTTPException(status_code=400, detail="文件缺少扩展名")
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            temp_file.write(content_bytes)
+            temp_path = temp_file.name
+        parsed = get_parser(suffix).parse(temp_path)
+        parsed.text = parsed.text.lstrip("\ufeff")
+        lines = [line.strip() for line in parsed.text.splitlines() if line.strip()]
+        for table in parsed.tables or []:
+            rows = table.get("rows", []) if isinstance(table, dict) else []
+            for row in rows:
+                cells = [str(cell).strip().replace("\n", " ") for cell in row]
+                if any(cells):
+                    lines.append(" | ".join(cells))
+        numbered = "\n".join(f"{line_no}\t{text}" for line_no, text in enumerate(lines, 1))
+        if len("".join(lines)) < 50:
+            raise HTTPException(status_code=400, detail="文件内容为空、过少或可能是扫描件，请上传可复制文本版")
+        return numbered
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("投标审查文件解析失败 %s: %s", file.filename, exc)
+        raise HTTPException(status_code=400, detail=f"文件解析失败：{file.filename}") from exc
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+@router.get("/tender-bid-review/download/{file_name}")
+async def download_tender_bid_review(file_name: str):
+    """下载投标文件审查 Excel。只允许下载 bidmaster_exports 目录下文件。"""
+    import tempfile
+    import os
+    from urllib.parse import quote
+
+    temp_dir = os.path.join(tempfile.gettempdir(), "bidmaster_exports")
+    safe_name = os.path.basename(file_name)
+    file_path = os.path.join(temp_dir, safe_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在或已过期")
+    if not safe_name.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
+
+    from fastapi.responses import FileResponse
+    encoded = quote(safe_name)
+    return FileResponse(
+        path=file_path,
+        filename=safe_name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+    )
+
 @router.post("/upload-check")
 async def upload_and_check(
     bid_file: UploadFile = File(..., description="投标文件(.docx/.pdf/.txt)"),

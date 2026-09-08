@@ -1,4 +1,4 @@
-import axios from 'axios';
+﻿import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
@@ -341,6 +341,27 @@ export const checkApi = {
       timeout: 300000,
     });
   },
+  tenderBidReview: (
+    bidFile: File,
+    tenderFile: File,
+    companyName: string,
+    schoolName: string,
+  ) => {
+    const formData = new FormData();
+    formData.append('bid_file', bidFile);
+    formData.append('tender_file', tenderFile);
+    formData.append('company_name', companyName);
+    formData.append('school_name', schoolName);
+    return api.post('/check/tender-bid-review', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    });
+  },
+  downloadTenderBidReview: (fileName: string) =>
+    api.get(`/check/tender-bid-review/download/${encodeURIComponent(fileName)}`, {
+      responseType: 'blob',
+      timeout: 300000,
+    }),
   // 检查链单项实测 70-80s，全面检查 15 项即便限流并发也要数分钟；
   // 轮询预算给到 20 分钟，避免任务其实还在跑就被前端判成超时。
   pollCheckTask: async (taskId: string, onProgress?: (msg: string) => void, maxPolls: number = 400, interval: number = 3000): Promise<Record<string, unknown>> => {

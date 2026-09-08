@@ -8,7 +8,7 @@ import StepHeader from '../components/common/StepHeader';
 import MarkdownRenderer from '../components/common/MarkdownRenderer';
 
 type CheckType = 'fullCheck' | 'compliance' | 'disqualification' | 'qualification' | 'pricing' | 'fitScore' | 'selfcheck' | 'deposit' | 'signature' | 'validity' | 'consistency' | 'duplicate' | 'mandatoryReq' | 'docIntegrity' | 'aiTextCheck' | 'riskScore' | 'crossCheck' | 'sampleReport' | 'jointBid' | 'ebidSubmit' | 'pricingLogic' | 'scoreCoverage';
-type CheckMode = 'project' | 'upload';
+type CheckMode = 'project' | 'upload' | 'tenderReview';
 
 interface CheckOption {
   key: CheckType;
@@ -143,6 +143,12 @@ export default function CheckPage() {
   const [tenderFile, setTenderFile] = useState<File | null>(null);
   const bidFileRef = useRef<HTMLInputElement>(null);
   const tenderFileRef = useRef<HTMLInputElement>(null);
+  const [companyName, setCompanyName] = useState<string>('');
+  const [schoolName, setSchoolName] = useState<string>('');
+  const [reviewResult, setReviewResult] = useState<Record<string, unknown> | null>(null);
+  const [reviewFileName, setReviewFileName] = useState<string>('');
+  const [reviewDownloading, setReviewDownloading] = useState<boolean>(false);
+  const [reviewProgress, setReviewProgress] = useState<Record<string, { pct: number; label: string }>>({});
 
   const [projectChapters, setProjectChapters] = useState<ChapterInfo[]>([]);
   const [projectHasContent, setProjectHasContent] = useState<boolean>(false);
@@ -365,8 +371,93 @@ export default function CheckPage() {
     }
   };
 
+  const handleTenderBidReview = async () => {
+    if (!bidFile || !tenderFile) {
+      setError('投标书和招标文件都必须上传');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setResults(null);
+    setReviewResult(null);
+    setCheckProgress('');
+    setReviewProgress({
+      fileParse: { pct: 15, label: '解析中' },
+      disqualification: { pct: 0, label: '待开始' },
+      scoring: { pct: 0, label: '待开始' },
+      starParams: { pct: 0, label: '待开始' },
+      materials: { pct: 0, label: '待开始' },
+      timeline: { pct: 0, label: '待开始' },
+      contractTerms: { pct: 0, label: '待开始' },
+    });
+    try {
+      setReviewProgress(prev => ({
+        ...prev,
+        fileParse: { pct: 100, label: '完成' },
+        disqualification: { pct: 30, label: '进行中' },
+        scoring: { pct: 30, label: '进行中' },
+        starParams: { pct: 30, label: '进行中' },
+          materials: { pct: 30, label: '进行中' },
+          timeline: { pct: 30, label: '进行中' },
+          contractTerms: { pct: 30, label: '进行中' },
+      }));
+      const res = await checkApi.tenderBidReview(bidFile, tenderFile, companyName, schoolName);
+      const taskId = (res.data as Record<string, unknown>)?.task_id as string;
+      if (taskId) {
+        setCheckProgress('投标文件审查任务已提交...');
+        const result = await checkApi.pollCheckTask(taskId, (msg) => setCheckProgress(msg));
+        setReviewProgress({
+          fileParse: { pct: 100, label: '完成' },
+          disqualification: { pct: 100, label: '完成' },
+          scoring: { pct: 100, label: '完成' },
+          starParams: { pct: 100, label: '完成' },
+          materials: { pct: 100, label: '完成' },
+          timeline: { pct: 100, label: '完成' },
+          contractTerms: { pct: 100, label: '完成' },
+        });
+        const payload = result as Record<string, unknown>;
+        const data = (payload.data || {}) as Record<string, unknown>;
+        if (!payload.success) throw new Error((payload.error as string) || '审查失败');
+        if (data.file_name) setReviewFileName(data.file_name as string);
+        setReviewResult(payload);
+        setCheckProgress('');
+        return;
+      }
+      setReviewResult(res.data);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : '审查失败');
+      setReviewProgress({});
+    } finally {
+      setLoading(false);
+      setCheckProgress('');
+    }
+  };
+
+  const handleDownloadReview = async () => {
+    if (!reviewFileName) return;
+    setReviewDownloading(true);
+    try {
+      const res = await checkApi.downloadTenderBidReview(reviewFileName);
+      const blob = new Blob([res.data as unknown as BlobPart], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = reviewFileName;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : '下载失败');
+    } finally {
+      setReviewDownloading(false);
+    }
+  };
+
   const handleCheck = () => {
-    if (checkMode === 'upload') {
+    if (checkMode === 'tenderReview') {
+      handleTenderBidReview();
+    } else if (checkMode === 'upload') {
       handleUploadCheck();
     } else {
       handleProjectCheck();
@@ -1168,7 +1259,39 @@ export default function CheckPage() {
     </div>
   );
 
-  const isCheckDisabled = loading || (checkMode === 'project' && (!selectedProjectId || !projectHasContent)) || (checkMode === 'upload' && !bidFile);
+  const isCheckDisabled = loading
+    || (checkMode === 'project' && (!selectedProjectId || !projectHasContent))
+    || (checkMode === 'upload' && !bidFile)
+    || (checkMode === 'tenderReview' && (!bidFile || !tenderFile || !companyName.trim() || !schoolName.trim()));
+
+  const renderTenderReviewProgress = () => {
+    if (checkMode !== 'tenderReview' || !reviewProgress || Object.keys(reviewProgress).length === 0) return null;
+    const labels: Record<string, string> = {
+      fileParse: '文件解析',
+      disqualification: '废标项扫描',
+      scoring: '评分项对照',
+      starParams: '▲参数核对',
+      materials: '证明材料对照',
+      timeline: '时间节点核对',
+      contractTerms: '合同条款提取',
+    };
+    return (
+      <div style={{ marginTop: '16px', background: 'var(--color-surface)', borderRadius: '12px', padding: '20px', border: '1px solid var(--color-border)' }}>
+        <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>审查进度</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {Object.entries(reviewProgress).map(([key, val]) => (
+            <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ width: '100px', fontSize: '12px', color: 'var(--color-text-secondary)', textAlign: 'right', flexShrink: 0 }}>{labels[key] || key}</span>
+              <div style={{ flex: 1, background: '#e5e7eb', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
+                <div style={{ width: `${val.pct}%`, background: val.pct === 100 ? '#059669' : '#3b82f6', height: '100%', borderRadius: '4px', transition: 'width 0.3s' }} />
+              </div>
+              <span style={{ width: '40px', fontSize: '11px', color: val.pct === 100 ? '#059669' : val.pct > 0 ? '#3b82f6' : '#9ca3af', flexShrink: 0 }}>{val.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   const renderCheckButton = () => (
     <button
@@ -1189,7 +1312,7 @@ export default function CheckPage() {
         marginBottom: '20px',
       }}
     >
-      {loading ? (checkProgress || '检查中...') : `运行${checkOptions.find(o => o.key === activeCheck)?.label || '检查'}`}
+      {loading ? (checkProgress || '审查中...') : checkMode === 'tenderReview' ? '开始审查 →' : `运行${checkOptions.find(o => o.key === activeCheck)?.label || '检查'}`}
     </button>
   );
 
@@ -1272,7 +1395,7 @@ export default function CheckPage() {
       <StepHeader
         step={3}
         title="投标检查"
-        subtitle="上传已有标书直接检查，或从项目中检查，21项全面审核"
+        subtitle="上传标书直接检查、项目检查、或双文件审查生成 Excel 报告"
         color="#d97706"
         nextPath="/format"
         nextLabel="下一步：文档输出"
@@ -1282,6 +1405,7 @@ export default function CheckPage() {
         {([
           { key: 'upload' as CheckMode, label: '上传标书检查', icon: <Upload size={14} /> },
           { key: 'project' as CheckMode, label: '项目检查', icon: <FolderOpen size={14} /> },
+          { key: 'tenderReview' as CheckMode, label: '投标文件审查', icon: <BookOpen size={14} /> },
         ]).map(tab => (
           <button
             key={tab.key}
@@ -1343,15 +1467,112 @@ export default function CheckPage() {
               </div>
             </div>
           )}
+          {checkMode === 'tenderReview' && (
+            <div style={{ background: 'var(--color-surface)', borderRadius: '12px', padding: '24px', border: '1px solid var(--color-border)', marginBottom: '20px' }}>
+              <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '16px' }}>投标文件审查 · 上传文件</h3>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                {renderUploadZone('招标文件（必传）', tenderFile, setTenderFile, tenderFileRef, '.docx,.pdf', true)}
+                {renderUploadZone('投标书（必传）', bidFile, setBidFile, bidFileRef, '.docx,.pdf', true)}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginTop: '16px' }}>
+                <div>
+                  <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '6px' }}>公司名称（投标方）</label>
+                  <input type="text" value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="如：XX信息科技有限公司" style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', background: 'var(--color-surface)' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: '13px', color: 'var(--color-text-secondary)', display: 'block', marginBottom: '6px' }}>学校名称（招标方/业主）</label>
+                  <input type="text" value={schoolName} onChange={(e) => setSchoolName(e.target.value)} placeholder="如：XX大学" style={{ width: '100%', padding: '8px 12px', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '13px', background: 'var(--color-surface)' }} />
+                </div>
+              </div>
+              <div style={{ marginTop: '12px', padding: '10px', background: '#f0f9ff', borderRadius: '6px', fontSize: '12px', color: '#1e40af' }}>
+                💡 两个文件都上传后才能开始审查，完成后自动生成 Excel 下载链接。
+              </div>
+            </div>
+          )}
           {checkMode === 'project' && renderProjectSelector()}
-          {renderCheckOptionsGrid()}
+          {checkMode !== 'tenderReview' && renderCheckOptionsGrid()}
           {renderCheckButton()}
+          {renderTenderReviewProgress()}
         </>
       )}
 
       {error && (
         <div style={{ marginTop: '16px', padding: '12px', background: '#fef2f2', borderRadius: '8px', color: '#dc2626', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <AlertTriangle size={16} /> {error}
+        </div>
+      )}
+
+      {checkMode === 'tenderReview' && reviewResult && (
+        <div style={{ marginTop: '20px', background: 'var(--color-surface)', borderRadius: '12px', padding: '24px', border: '1px solid var(--color-border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>投标文件审查结果</h3>
+            {reviewFileName && (
+              <button
+                onClick={handleDownloadReview}
+                disabled={reviewDownloading}
+                style={{
+                  padding: '8px 18px',
+                  background: '#059669',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: reviewDownloading ? 'not-allowed' : 'pointer',
+                  fontSize: '13px',
+                  fontWeight: 500,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  opacity: reviewDownloading ? 0.6 : 1,
+                }}
+              >
+                {reviewDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                下载 Excel 报告
+              </button>
+            )}
+          </div>
+          {(() => {
+            const data = (reviewResult as Record<string, unknown>).data as Record<string, unknown> | undefined;
+            if (!data) return null;
+            const counts = (data.dimension_counts || {}) as Record<string, number>;
+            const total = Number(data.total_items || 0);
+            const high = Number(data.high_count || 0);
+            const sum = Object.values(counts).reduce((a, b) => a + Number(b || 0), 0);
+            return (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px', marginBottom: '16px' }}>
+                  <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', padding: '16px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '24px', fontWeight: 700, color: '#dc2626' }}>{high}</div>
+                    <div style={{ fontSize: '12px', color: '#dc2626', marginTop: '4px' }}>高风险条目</div>
+                  </div>
+                  <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '8px', padding: '16px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '24px', fontWeight: 700, color: '#059669' }}>{total}</div>
+                    <div style={{ fontSize: '12px', color: '#059669', marginTop: '4px' }}>审查总条数</div>
+                  </div>
+                  <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '16px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '24px', fontWeight: 700, color: '#2563eb' }}>{sum}</div>
+                    <div style={{ fontSize: '12px', color: '#2563eb', marginTop: '4px' }}>六维度合计</div>
+                  </div>
+                  <div style={{ background: Number(data.guardrail_missing || 0) > 0 ? '#fffbeb' : '#f0fdf4', border: `1px solid ${Number(data.guardrail_missing || 0) > 0 ? '#fde68a' : '#bbf7d0'}`, borderRadius: '8px', padding: '16px', textAlign: 'center' }}>
+                    <div style={{ fontSize: '24px', fontWeight: 700, color: Number(data.guardrail_missing || 0) > 0 ? '#d97706' : '#059669' }}>
+                      {String(data.guardrail_missing || 0)}/{String(data.guardrail_total || 0)}
+                    </div>
+                    <div style={{ fontSize: '12px', color: Number(data.guardrail_missing || 0) > 0 ? '#d97706' : '#059669', marginTop: '4px' }}>护栏未覆盖</div>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  {Object.entries(counts).map(([key, val]) => (
+                    <div key={key} style={{ padding: '8px 14px', background: 'var(--color-bg)', border: '1px solid var(--color-border)', borderRadius: '8px', fontSize: '12px' }}>
+                      <span style={{ fontWeight: 500 }}>{key}</span>
+                      <span style={{ color: 'var(--color-text-secondary)', marginLeft: '8px' }}>{String(val)} 条</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: '12px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                  💡 每条结果均带原文出处行号，可溯源到招标文件原文。产清单与事实，不下投/不投结论（tender-review-kit 四条铁律）。
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 
