@@ -9,7 +9,7 @@ from pathlib import Path
 
 import io
 
-from docx import Document
+from docx import Document as DocxDocument
 from docx.shared import Pt, Cm, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -1345,7 +1345,7 @@ def _parse_markdown_table(lines: list[str]) -> list[list[str]]:
     return rows
 
 
-def _add_table_to_doc(doc: Document, rows: list[list[str]]):
+def _add_table_to_doc(doc: DocxDocument, rows: list[list[str]]):
     if not rows:
         return
     num_cols = max(len(r) for r in rows)
@@ -1363,7 +1363,7 @@ def _add_table_to_doc(doc: Document, rows: list[list[str]]):
                         run.font.size = Pt(10.5)
 
 
-def _add_markdown_to_doc(doc: Document, md_text: str):
+def _add_markdown_to_doc(doc: DocxDocument, md_text: str):
     lines = md_text.split("\n")
     i = 0
     while i < len(lines):
@@ -1442,7 +1442,7 @@ async def export_docx(
     if not chapters:
         raise HTTPException(status_code=400, detail="暂无已生成的章节内容")
 
-    doc = Document()
+    doc = DocxDocument()
 
     section = doc.sections[0]
     section.page_width = Cm(21.0)
