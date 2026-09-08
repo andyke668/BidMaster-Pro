@@ -47,6 +47,15 @@ def _save_upload(file: UploadFile, prefix: str = "") -> Path:
     return dest
 
 
+def _unlink_quietly(*paths: Path) -> None:
+    """删掉导出过程中的临时落盘文件。数据此时已 read_bytes() 进内存，删失败也不影响响应。"""
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 @router.post("/format")
 async def format_document(
     file: UploadFile = File(...),
@@ -175,7 +184,10 @@ async def beautify_document(
 @router.post("/export-doc")
 async def export_to_doc(
     file: UploadFile = File(...),
-    template: str = "default",
+    # 必须显式 Form：前端把 template 放在 multipart body 里（api.ts exportDoc），
+    # 不标注时 FastAPI 按 query 参数解析，body 里的值被静默丢弃 ——
+    # 用户在「一键排版」选的模板对三个导出永远不生效，恒用 default。
+    template: str = Form("default"),
     apply_format: bool = Form(True),
     db: AsyncSession = Depends(get_db),
 ):
@@ -191,25 +203,19 @@ async def export_to_doc(
     from services.format.skills.doc_export_skill import DocExportSkill
     skill = DocExportSkill()
     if not docx_to_send.exists():
+        _unlink_quietly(src)
         raise HTTPException(status_code=500, detail="排版产物丢失")
 
     result = skill._try_libreoffice_doc(docx_to_send, docx_to_send.parent)
     if not result.get("success"):
-        if docx_to_send != src:
-            try:
-                docx_to_send.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _unlink_quietly(docx_to_send, src)
         raise HTTPException(status_code=500, detail=result.get("error", "doc 转换失败"))
 
     doc_path = Path(result["output_path"])
     data = doc_path.read_bytes()
-    try:
-        doc_path.unlink(missing_ok=True)
-        if docx_to_send != src:
-            docx_to_send.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # 此前只删排版产物、从不删 _save_upload 落下的 srcdocx_*，
+    # 每点一次导出就在 uploads/formatted 留一份源文件副本（大标书 1.2MB/次）
+    _unlink_quietly(doc_path, docx_to_send, src)
 
     filename = f"{Path(file.filename or 'document').stem}.doc"
     return StreamingResponse(
@@ -222,7 +228,7 @@ async def export_to_doc(
 @router.post("/export-pdf")
 async def export_to_pdf(
     file: UploadFile = File(...),
-    template: str = "default",
+    template: str = Form("default"),
     apply_format: bool = Form(True),
     db: AsyncSession = Depends(get_db),
 ):
@@ -250,21 +256,12 @@ async def export_to_pdf(
     )
     skill_result = await skill.safe_execute(ctx)
     if not skill_result.success or not skill_result.data:
-        if docx_to_send != src:
-            try:
-                docx_to_send.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _unlink_quietly(docx_to_send, src)
         raise HTTPException(status_code=500, detail=skill_result.error or "PDF 转换失败")
 
     pdf_path = Path(skill_result.data["output_path"])
     data = pdf_path.read_bytes()
-    try:
-        pdf_path.unlink(missing_ok=True)
-        if docx_to_send != src:
-            docx_to_send.unlink(missing_ok=True)
-    except OSError:
-        pass
+    _unlink_quietly(pdf_path, docx_to_send, src)
 
     filename = f"{Path(file.filename or 'document').stem}.pdf"
     return StreamingResponse(
@@ -277,18 +274,14 @@ async def export_to_pdf(
 @router.post("/export-formatted-docx")
 async def export_formatted_docx(
     file: UploadFile = File(...),
-    template: str = "default",
+    template: str = Form("default"),
     db: AsyncSession = Depends(get_db),
 ):
     """统一入口: 接收 docx → 排版 → 直接下载 docx 字节流。"""
     src = _save_upload(file, prefix="srcdocx_")
     formatted = await _run_format_skill(src, template, db) or src
     data = formatted.read_bytes()
-    try:
-        if formatted != src:
-            formatted.unlink(missing_ok=True)
-    except OSError:
-        pass
+    _unlink_quietly(formatted, src)
     filename = f"{Path(file.filename or 'document').stem}_formatted.docx"
     return StreamingResponse(
         io.BytesIO(data),
