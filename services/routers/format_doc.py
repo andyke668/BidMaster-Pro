@@ -364,7 +364,6 @@ async def format_from_project(
 
     title = f"{project.name} - 投标文件"
 
-    import tempfile
     from docx import Document
     from docx.shared import Pt
     from pathlib import Path
@@ -395,7 +394,7 @@ async def format_from_project(
             else:
                 doc.add_paragraph(line)
 
-    output_dir = Path(tempfile.gettempdir()) / "bidmaster_format"
+    output_dir = UPLOAD_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_name = re.sub(r'[^\w\u4e00-\u9fff\-_]', '_', project.name)[:60] or "bid"
     src_path = output_dir / f"{safe_name}_src_{project_id[:8]}.docx"
@@ -420,6 +419,11 @@ async def format_from_project(
         raise HTTPException(status_code=500, detail=result.error or "项目章节组装失败")
 
     final_output = result.data.get("output_path") if isinstance(result.data, dict) else None
+    if final_output and Path(final_output) != src_path:
+        try:
+            src_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     return {
         "success": True,

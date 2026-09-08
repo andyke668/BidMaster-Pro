@@ -431,14 +431,17 @@ export default function FormatPage() {
   };
 
   const handleExport = async (target: OutputFormat) => {
-    if (!file) {
-      setExportError('请先上传文件');
+    const isProjectSource = sourceMode === 'project';
+    if (isProjectSource ? !lastOutputPath : !file) {
+      setExportError(isProjectSource ? '请先执行「一键排版项目」生成排版产物' : '请先上传文件');
       return;
     }
     setExporting(target);
     setExportError('');
     try {
-      const baseName = file.name.replace(/\.docx?$/i, '');
+      const baseName = isProjectSource
+        ? projects.find(p => p.id === selectedProjectId)?.name || 'bid'
+        : file?.name.replace(/\.docx?$/i, '') || 'bid';
       if (target === 'docx' && lastOutputPath) {
         const link = document.createElement('a');
         link.href = formatApi.downloadOutput(lastOutputPath);
@@ -448,11 +451,25 @@ export default function FormatPage() {
         document.body.removeChild(link);
         return;
       }
+      let sourceFile: File;
+      let applyFormat = true;
+      if (isProjectSource) {
+        const resp = await fetch(formatApi.downloadOutput(lastOutputPath));
+        if (!resp.ok) {
+          throw new Error(`排版产物读取失败（HTTP ${resp.status}）`);
+        }
+        sourceFile = new File([await resp.blob()], `${baseName}.docx`, {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        });
+        applyFormat = false;
+      } else {
+        sourceFile = file!;
+      }
       const res = target === 'docx'
-        ? await formatApi.exportFormattedDocx(file, template)
+        ? await formatApi.exportFormattedDocx(sourceFile, template)
         : target === 'doc'
-          ? await formatApi.exportDoc(file, template, true)
-          : await formatApi.exportPdf(file, template, true);
+          ? await formatApi.exportDoc(sourceFile, template, applyFormat)
+          : await formatApi.exportPdf(sourceFile, template, applyFormat);
       const blob = res.data as unknown;
       if (!(blob instanceof Blob)) {
         throw new Error('后端未返回文件内容（可能是错误响应）');
