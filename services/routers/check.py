@@ -7,6 +7,7 @@ import logging
 import re
 import tempfile
 import os
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
@@ -1116,6 +1117,7 @@ async def tender_bid_review(
     tender_filename = tender_file.filename if tender_file else None
 
     tm = TaskManager.instance()
+    review_task_id = str(uuid.uuid4())
     task = await tm.submit(
         "tender_bid_review",
         _do_tender_bid_review,
@@ -1125,7 +1127,7 @@ async def tender_bid_review(
         school_name,
         bid_filename,
         tender_filename,
-        task_id=task.task_id,
+        task_id=review_task_id,
     )
 
     return {
