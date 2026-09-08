@@ -1138,9 +1138,9 @@ async def upload_and_check(
         "bid_filename": bid_filename,
         "tender_filename": tender_filename,
         "message": (
-            "全面检查任务已提交（15 项，通常需 3-10 分钟），请通过 GET /check/task/{task_id} 查询进度"
+            f"全面检查任务已提交（15 项，通常需 3-10 分钟），请通过 GET /check/task/{task.task_id} 查询进度"
             if check_type == "fullCheck"
-            else f"{check_type} 检查任务已提交，请通过 GET /check/task/{task_id} 查询进度"
+            else f"{check_type} 检查任务已提交，请通过 GET /check/task/{task.task_id} 查询进度"
         ),
     }
 
