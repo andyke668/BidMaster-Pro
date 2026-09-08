@@ -56,9 +56,11 @@ class DocExportSkill(Skill):
         return SkillResult(
             success=False,
             error=(
-                f"doc 转换失败: 未找到 LibreOffice/soffice 或 pandoc。"
-                f" 提示: Windows 安装 LibreOffice 或 pandoc；"
-                f" 也可让前端直接下载 docx 后改名为 doc 临时使用。"
+                "doc 转换失败: 未找到 LibreOffice/soffice。"
+                " docx → doc 只有 LibreOffice 能转（pandoc 没有 doc writer，"
+                "docx2pdf 依赖 Windows + MS Word）。"
+                " 提示: 容器内需安装 libreoffice-writer-nogui；"
+                " 也可让前端直接下载 docx 后改名为 doc 临时使用。"
             ),
         )
 
@@ -88,7 +90,11 @@ class DocExportSkill(Skill):
                     f"-env:UserInstallation=file://{profile_dir.replace(os.sep, '/')}",
                     "--headless",
                     "--convert-to",
-                    "doc:MS Word 2007 XML",
+                    # 过滤器名必须是 "MS Word 97"（.doc 二进制）。
+                    # 原写法 "MS Word 2007 XML" 是 .docx 的过滤器，soffice 会照它输出
+                    # 一个 ZIP 包再命名成 .doc —— 退出码 0、文件也在，但 antiword/Word
+                    # 97 都打不开，属于"看起来成功的坏产物"。
+                    "doc:MS Word 97",
                     "--outdir",
                     str(target_dir),
                     str(src),
