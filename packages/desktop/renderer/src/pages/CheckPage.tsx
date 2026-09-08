@@ -149,6 +149,7 @@ export default function CheckPage() {
   const [reviewFileName, setReviewFileName] = useState<string>('');
   const [reviewDownloading, setReviewDownloading] = useState<boolean>(false);
   const [reviewProgress, setReviewProgress] = useState<Record<string, { pct: number; label: string }>>({});
+  const [reviewOverallProgress, setReviewOverallProgress] = useState<number>(0);
 
   const [projectChapters, setProjectChapters] = useState<ChapterInfo[]>([]);
   const [projectHasContent, setProjectHasContent] = useState<boolean>(false);
@@ -381,6 +382,7 @@ export default function CheckPage() {
     setResults(null);
     setReviewResult(null);
     setCheckProgress('');
+    setReviewOverallProgress(2);
     setReviewProgress({
       fileParse: { pct: 15, label: '解析中' },
       disqualification: { pct: 0, label: '待开始' },
@@ -405,7 +407,10 @@ export default function CheckPage() {
       const taskId = (res.data as Record<string, unknown>)?.task_id as string;
       if (taskId) {
         setCheckProgress('投标文件审查任务已提交...');
-        const result = await checkApi.pollCheckTask(taskId, (msg) => setCheckProgress(msg));
+        const result = await checkApi.pollCheckTask(taskId, (msg, progress) => {
+          setCheckProgress(msg);
+          if (typeof progress === 'number') setReviewOverallProgress(Math.max(2, progress));
+        });
         setReviewProgress({
           fileParse: { pct: 100, label: '完成' },
           disqualification: { pct: 100, label: '完成' },
@@ -415,6 +420,7 @@ export default function CheckPage() {
           timeline: { pct: 100, label: '完成' },
           contractTerms: { pct: 100, label: '完成' },
         });
+        setReviewOverallProgress(100);
         const payload = result as Record<string, unknown>;
         const data = (payload.data || {}) as Record<string, unknown>;
         if (!payload.success) throw new Error((payload.error as string) || '审查失败');
@@ -427,6 +433,7 @@ export default function CheckPage() {
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '审查失败');
       setReviewProgress({});
+      setReviewOverallProgress(0);
     } finally {
       setLoading(false);
       setCheckProgress('');
@@ -593,10 +600,29 @@ export default function CheckPage() {
       />
       {file && (
         <button
-          onClick={(e) => { e.stopPropagation(); setFileFn(null); }}
-          style={{ marginTop: '4px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px', color: '#dc2626' }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (ref.current) ref.current.value = '';
+            setFileFn(null);
+          }}
+          style={{
+            marginTop: '8px',
+            width: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '6px',
+            padding: '8px 12px',
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            fontSize: '12px',
+            fontWeight: 600,
+            color: '#dc2626',
+          }}
         >
-          移除文件
+          <XCircle size={14} /> 删除文件
         </button>
       )}
     </div>
@@ -1277,7 +1303,13 @@ export default function CheckPage() {
     };
     return (
       <div style={{ marginTop: '16px', background: 'var(--color-surface)', borderRadius: '12px', padding: '20px', border: '1px solid var(--color-border)' }}>
-        <div style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px' }}>审查进度</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+          <span style={{ fontSize: '14px', fontWeight: 600 }}>审查进度</span>
+          <span style={{ fontSize: '18px', fontWeight: 700, color: '#2563eb' }}>{reviewOverallProgress}%</span>
+        </div>
+        <div style={{ height: '8px', background: '#e5e7eb', borderRadius: '4px', overflow: 'hidden', marginBottom: '16px' }}>
+          <div style={{ width: `${reviewOverallProgress}%`, background: reviewOverallProgress === 100 ? '#059669' : '#2563eb', height: '100%', borderRadius: '4px', transition: 'width 0.3s' }} />
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {Object.entries(reviewProgress).map(([key, val]) => (
             <div key={key} style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>

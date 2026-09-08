@@ -80,6 +80,13 @@ class TaskManager:
     def get_task(self, task_id: str) -> AsyncTask | None:
         return self._tasks.get(task_id)
 
+    def set_progress(self, task_id: str, progress: float, message: str = "") -> None:
+        task = self._tasks.get(task_id)
+        if not task:
+            return
+        task.progress = max(0.0, min(1.0, progress))
+        task.progress_message = message
+
     async def submit(
         self,
         task_type: str,

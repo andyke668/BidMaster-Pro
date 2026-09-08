@@ -217,6 +217,10 @@ class TenderBidReviewSkill(Skill):
     version = "1.1.0"
     triggers = ["投标文件审查", "审查报告", "投标审查"]
 
+    _MAX_CONCURRENT_REQUESTS = 4
+    _MAX_RELATED_BID_CHUNKS = 3
+    _MAX_BID_FALLBACK_CHUNKS = 2
+
     async def execute(self, ctx: SkillContext) -> SkillResult:
         tender_text = ctx.parameters.get("tender_lines", ctx.parameters.get("tender_text", ""))
         bid_text = ctx.parameters.get("bid_lines", ctx.parameters.get("bid_text", ""))
@@ -228,18 +232,68 @@ class TenderBidReviewSkill(Skill):
         if not bid_text:
             return SkillResult(success=False, error="投标文件内容为空")
 
-        results = await asyncio.gather(
-            *[self._run_dimension(ctx, cfg, tender_text, bid_text) for cfg in _SHEET_CONFIGS],
+        tender_chunks = self._make_chunks(self._to_lines(tender_text))
+        bid_chunks = self._make_chunks(self._to_lines(bid_text))
+        total_chunks = max(1, len(tender_chunks) * len(_SHEET_CONFIGS))
+        completed_chunks = 0
+        completed_dimensions = 0
+        progress_lock = asyncio.Lock()
+        llm_semaphore = asyncio.Semaphore(self._MAX_CONCURRENT_REQUESTS)
+        if ctx.progress_callback:
+            await ctx.progress_callback(self.name, "dimension_started", {"progress": 0.02, "completed": 0, "total": total_chunks})
+
+        async def complete_chunk() -> None:
+            nonlocal completed_chunks
+            async with progress_lock:
+                completed_chunks += 1
+                if ctx.progress_callback:
+                    progress = 0.02 + 0.92 * completed_chunks / total_chunks
+                    await ctx.progress_callback(
+                        self.name,
+                        "chunk_completed",
+                        {"progress": progress, "completed": completed_chunks, "total": total_chunks},
+                    )
+
+        async def run_one_dimension(cfg: dict) -> tuple[dict, list[dict] | Exception]:
+            nonlocal completed_dimensions
+            try:
+                result = await self._run_dimension(
+                    ctx,
+                    cfg,
+                    tender_text,
+                    bid_text,
+                    llm_semaphore=llm_semaphore,
+                    on_chunk_done=complete_chunk,
+                )
+            except Exception as exc:
+                result = exc
+            async with progress_lock:
+                completed_dimensions += 1
+            if ctx.progress_callback:
+                await ctx.progress_callback(
+                    self.name,
+                    "dimension_completed",
+                    {"progress": 0.94 + 0.01 * completed_dimensions, "completed": completed_chunks, "total": total_chunks},
+                )
+            return cfg, result
+
+        dimension_results = await asyncio.gather(
+            *[run_one_dimension(cfg) for cfg in _SHEET_CONFIGS],
             return_exceptions=True,
         )
 
         dimension_data: dict[str, list[dict]] = {}
         errors: list[str] = []
-        for cfg, result in zip(_SHEET_CONFIGS, results):
+        for cfg in _SHEET_CONFIGS:
+            dimension_data[cfg["key"]] = []
+        for dimension_result in dimension_results:
+            if isinstance(dimension_result, BaseException):
+                errors.append(str(dimension_result))
+                continue
+            cfg, result = dimension_result
             if isinstance(result, Exception):
                 logger.warning("[tender_bid_review] %s error: %s", cfg["key"], result)
                 errors.append(f"{cfg['title']}: {result}")
-                dimension_data[cfg["key"]] = []
             else:
                 dimension_data[cfg["key"]] = result
 
@@ -290,19 +344,25 @@ class TenderBidReviewSkill(Skill):
         )
 
     async def _run_dimension(
-        self, ctx: SkillContext, cfg: dict, tender_text: str, bid_text: str
+        self,
+        ctx: SkillContext,
+        cfg: dict,
+        tender_text: str,
+        bid_text: str,
+        *,
+        llm_semaphore: asyncio.Semaphore,
+        on_chunk_done,
     ) -> list[dict]:
-        tender_lines = self._to_lines(tender_text)
-        bid_lines = self._to_lines(bid_text)
-        tender_chunks = self._make_chunks(tender_lines)
-        bid_chunks = self._make_chunks(bid_lines)
+        tender_chunks = self._make_chunks(self._to_lines(tender_text))
+        bid_chunks = self._make_chunks(self._to_lines(bid_text))
         results: list[dict] = []
 
         for tender_chunk in tender_chunks:
             related_bid = self._related_bid_chunks(tender_chunk, bid_chunks)
-            bid_context = "\n\n".join(chunk["text"] for chunk in related_bid[:18])
-            if not bid_context:
-                bid_context = "\n\n".join(chunk["text"] for chunk in bid_chunks[:8])
+            selected_bid = related_bid[:self._MAX_RELATED_BID_CHUNKS]
+            if not selected_bid:
+                selected_bid = bid_chunks[:self._MAX_BID_FALLBACK_CHUNKS]
+            bid_context = "\n\n".join(chunk["text"] for chunk in selected_bid)
             messages = [
                 {
                     "role": "system",
@@ -313,12 +373,14 @@ class TenderBidReviewSkill(Skill):
                     "content": f"招标文件片段（{tender_chunk['range']}）：\n{tender_chunk['text']}\n\n投标书相关片段：\n{bid_context}",
                 },
             ]
-            result = await ctx.llm.collect_json(messages=messages, temperature=0.1, max_tokens=16384)
+            async with llm_semaphore:
+                result = await ctx.llm.collect_json(messages=messages, temperature=0.1, max_tokens=16384)
             if not isinstance(result, dict):
                 raise TypeError("模型返回的不是 JSON 对象")
             chunk_items = result.get("items", [])
             if isinstance(chunk_items, list):
                 results.extend(item for item in chunk_items if isinstance(item, dict))
+            await on_chunk_done()
         return results
 
     def _to_lines(self, text: str) -> list[tuple[int, str]]:

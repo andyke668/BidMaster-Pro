@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import functools
 import logging
 import re
 import tempfile
@@ -1156,6 +1157,10 @@ async def _do_tender_bid_review(
             project_id="",
             db=skill_db,
             llm=gateway,
+            progress_callback=functools.partial(
+                _report_review_progress,
+                task.task_id,
+            ),
             parameters={
                 "tender_lines": tender_text,
                 "bid_lines": bid_text,
@@ -1194,6 +1199,27 @@ async def _do_tender_bid_review(
             response["data"]["file_name"] = safe_name
 
         return response
+
+
+async def _report_review_progress(task_id: str, skill_name: str, stage: str, payload: dict) -> None:
+    stage_messages = {
+        "started": "任务已启动",
+        "dimension_started": "正在生成审查任务",
+        "chunk_started": "正在交叉审查",
+        "chunk_completed": "已完成审查片段",
+        "dimension_completed": "已完成审查维度",
+    }
+    if stage == "completed":
+        TaskManager.instance().set_progress(task_id, 1.0, "审查完成")
+        return
+    if stage == "failed":
+        TaskManager.instance().set_progress(task_id, float(payload.get("progress", 0.0)), "审查失败")
+        return
+    TaskManager.instance().set_progress(
+        task_id,
+        float(payload.get("progress", 0.0)),
+        f"{stage_messages.get(stage, stage)}（{payload.get('completed', 0)}/{payload.get('total', 0)}）",
+    )
 
 
 async def _parse_review_document(file: UploadFile) -> str:
