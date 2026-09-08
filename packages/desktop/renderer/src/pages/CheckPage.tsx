@@ -342,13 +342,25 @@ export default function CheckPage() {
     setLoading(true);
     setError('');
     setResults(null);
+    setCheckProgress('');
     try {
+      // 后端已改为「提交任务 + 轮询」：单项检查实测就要 70-80s，全面检查 15 项
+      // 同步等待必然撞上 axios 300s 超时，用户只会看到「检查失败」。
       const res = await checkApi.uploadCheck(bidFile, tenderFile, activeCheck);
+      const taskId = (res.data as Record<string, unknown>)?.task_id as string;
+      if (taskId) {
+        setCheckProgress(activeCheck === 'fullCheck' ? '全面检查任务已提交...' : '检查任务已提交...');
+        const result = await checkApi.pollCheckTask(taskId, (msg) => setCheckProgress(msg));
+        setResults(result);
+        setCheckProgress('');
+        return;
+      }
       setResults(res.data);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '检查失败');
     } finally {
       setLoading(false);
+      setCheckProgress('');
       if (checkMode === 'project') loadReports();
     }
   };
@@ -511,6 +523,9 @@ export default function CheckPage() {
       const v = val as Record<string, unknown>;
       const d = (v.data || {}) as Record<string, unknown>;
       const success = v.success as boolean;
+      // 后端把失败原因放在 error 里（safe_execute 会带上 traceback），
+      // 以前这里直接丢掉，用户只能看到「异常」两个字，无从判断问题出在哪。
+      const errorText = typeof v.error === 'string' ? v.error : '';
       const riskLevel = d.risk_level as string || 'low';
       const hasCritical = d.has_critical_issues as boolean || false;
       const isHigh = riskLevel === 'high' || hasCritical;
@@ -521,7 +536,7 @@ export default function CheckPage() {
 
       const label = checkOptions.find(o => o.key === key)?.label || key;
 
-      return { key, label, success, riskLevel, hasCritical, isHigh, data: d };
+      return { key, label, success, riskLevel, hasCritical, isHigh, data: d, errorText };
     });
 
     return (
@@ -559,7 +574,9 @@ export default function CheckPage() {
               }}
               onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = '#f8fafc'; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
-              title="点击查看此项检查的详细报告"
+              title={item.errorText
+                ? `执行异常：${item.errorText.split('\n')[0]}`
+                : '点击查看此项检查的详细报告'}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 {item.success ? (
@@ -693,9 +710,25 @@ export default function CheckPage() {
                           {item.isHigh ? '高风险' : item.success ? '通过' : '执行异常'}
                         </span>
                       </div>
+                      {!item.success && item.errorText && (
+                        <div style={{
+                          marginBottom: '8px',
+                          padding: '8px 10px',
+                          background: '#fffbeb',
+                          border: '1px solid #fde68a',
+                          borderRadius: '6px',
+                        }}>
+                          <div style={{ fontSize: '11px', fontWeight: 600, color: '#b45309', marginBottom: '4px' }}>
+                            执行异常原因
+                          </div>
+                          <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: '11px', color: '#78350f', margin: 0, maxHeight: '160px', overflow: 'auto' }}>
+                            {item.errorText}
+                          </pre>
+                        </div>
+                      )}
                       <div style={{ fontSize: '12px', color: 'var(--color-text-secondary)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 12px' }}>
-                        <div>风险等级: <strong style={{ color: '#0f172a' }}>{item.riskLevel || '-'}</strong></div>
-                        <div>是否存在严重问题: <strong style={{ color: '#0f172a' }}>{item.hasCritical ? '是' : '否'}</strong></div>
+                        <div>风险等级: <strong style={{ color: '#0f172a' }}>{item.success ? (item.riskLevel || '-') : '-'}</strong></div>
+                        <div>是否存在严重问题: <strong style={{ color: '#0f172a' }}>{!item.success ? '-' : item.hasCritical ? '是' : '否'}</strong></div>
                         {d.summary != null && <div style={{ gridColumn: '1 / -1' }}>摘要: {String(d.summary)}</div>}
                         {d.overall_assessment != null && <div style={{ gridColumn: '1 / -1' }}>整体评估: {String(d.overall_assessment)}</div>}
                         {Array.isArray(d.findings) && (d.findings as unknown[]).length > 0 && (
@@ -850,7 +883,37 @@ export default function CheckPage() {
     </div>
   );
 
-  const renderSingleCheckResult = (data: Record<string, unknown>) => {
+  const renderSingleCheckResult = (
+    data: Record<string, unknown>,
+    meta?: { success?: boolean; error?: string },
+  ) => {
+    // 检查执行失败时 data 是空对象，继续往下渲染会得到「风险等级：低风险」+ 一个空 {}，
+    // 看起来像通过了。这里提前拦下来，把后端返回的真实原因展示出来。
+    if (meta?.success === false) {
+      const errorText = typeof meta.error === 'string' ? meta.error : '';
+      return (
+        <div style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '8px',
+          padding: '10px 12px',
+          borderRadius: '6px',
+          background: '#fffbeb',
+          border: '1px solid #fde68a',
+        }}>
+          <AlertTriangle size={18} color="#d97706" />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600, color: '#b45309', fontSize: '14px', marginBottom: '4px' }}>
+              该项检查执行异常，未产出结果
+            </div>
+            <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: '11px', color: '#78350f', margin: 0, maxHeight: '240px', overflow: 'auto' }}>
+              {errorText || '后端未返回错误详情'}
+            </pre>
+          </div>
+        </div>
+      );
+    }
+
     const riskLevel = data.risk_level as string || 'low';
     const hasCritical = data.has_critical_issues as boolean || false;
     const findings = (data.findings || data.issues || data.problems || data.items || []) as Array<Record<string, unknown>>;
@@ -1192,7 +1255,13 @@ export default function CheckPage() {
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {activeCheck === 'fullCheck' && typeof results === 'object' && results !== null && 'data' in results
             ? renderFullCheckSummary((results as Record<string, unknown>).data as Record<string, unknown>)
-            : renderSingleCheckResult((results as Record<string, unknown>).data as Record<string, unknown>)}
+            : renderSingleCheckResult(
+                (results as Record<string, unknown>).data as Record<string, unknown>,
+                {
+                  success: (results as Record<string, unknown>).success as boolean,
+                  error: (results as Record<string, unknown>).error as string,
+                },
+              )}
         </div>
       </div>
     );

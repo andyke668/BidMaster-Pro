@@ -341,7 +341,9 @@ export const checkApi = {
       timeout: 300000,
     });
   },
-  pollCheckTask: async (taskId: string, onProgress?: (msg: string) => void, maxPolls: number = 120, interval: number = 3000): Promise<Record<string, unknown>> => {
+  // 检查链单项实测 70-80s，全面检查 15 项即便限流并发也要数分钟；
+  // 轮询预算给到 20 分钟，避免任务其实还在跑就被前端判成超时。
+  pollCheckTask: async (taskId: string, onProgress?: (msg: string) => void, maxPolls: number = 400, interval: number = 3000): Promise<Record<string, unknown>> => {
     let consecutiveErrors = 0;
     for (let i = 0; i < maxPolls; i++) {
       await new Promise(r => setTimeout(r, interval));
@@ -369,7 +371,7 @@ export const checkApi = {
         }
       }
     }
-    throw new Error('检查任务超时，请稍后在报告列表中查看结果');
+    throw new Error('检查任务超时（已等待 20 分钟），请稍后重试或改用单项检查');
   },
 };
 

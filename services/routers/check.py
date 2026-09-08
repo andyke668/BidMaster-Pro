@@ -34,6 +34,20 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + "\n\n[... 内容已截断，已省略后续部分 ...]"
 
 
+def _check_max_concurrent() -> int:
+    """检查链的 LLM 并发度。默认 8，可用 BMP_CHECK_MAX_CONCURRENT 覆盖。
+
+    全面检查一次要跑 15 个 skill，裸 asyncio.gather 会把 15 路请求同时压到网关上；
+    一旦触发限流就是 15 项一起失败，前端表现为「全是异常」。限流后墙钟时间略增，
+    但换来的是可预期的成功率——与解读链 BMP_INTERPRET_MAX_CONCURRENT 同一套做法。
+    """
+    try:
+        value = int(os.getenv("BMP_CHECK_MAX_CONCURRENT", "8"))
+    except ValueError:
+        return 8
+    return max(1, min(value, 15))
+
+
 async def _get_tender_and_bid_text(project_id: str, db: AsyncSession):
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
@@ -227,7 +241,6 @@ async def check_pricing(project_id: str, db: AsyncSession = Depends(get_db)):
         if isinstance(project_info, dict):
             budget_str = project_info.get("预算金额", "")
             if budget_str:
-                import re
                 match = re.search(r"[\d.]+", str(budget_str))
                 if match:
                     max_price = float(match.group())
@@ -322,7 +335,6 @@ async def run_selfcheck(project_id: str, db: AsyncSession = Depends(get_db)):
             if isinstance(project_info, dict):
                 budget_str = project_info.get("预算金额", "")
                 if budget_str:
-                    import re
                     match = re.search(r"[\d.]+", str(budget_str))
                     if match:
                         max_price = float(match.group())
@@ -438,7 +450,6 @@ async def _do_full_check(project_id: str):
                 if isinstance(project_info, dict):
                     budget_str = project_info.get("预算金额", "")
                     if budget_str:
-                        import re
                         match = re.search(r"[\d.]+", str(budget_str))
                         if match:
                             max_price = float(match.group())
@@ -446,29 +457,12 @@ async def _do_full_check(project_id: str):
                 if isinstance(timeline, dict):
                     bid_deadline = timeline.get("投标截止日", "")
 
-            # Build skill tasks for parallel execution
-            import importlib
+            # 并发执行但必须限流，理由见 _check_max_concurrent()。
+            semaphore = asyncio.Semaphore(_check_max_concurrent())
 
             async def _run_skill(ct: str, params: dict) -> tuple[str, dict]:
-                skill_info = _CHECK_SKILL_MAP.get(ct)
-                if not skill_info:
-                    return ct, {"success": False, "error": f"未知的检查类型: {ct}"}
-                module_path, class_name = skill_info
-                try:
-                    module = importlib.import_module(module_path)
-                    skill_class = getattr(module, class_name)
-                    skill = skill_class()
-                    # Each skill gets its own DB session to avoid concurrent access issues
-                    async with session_factory() as skill_db:
-                        ctx = SkillContext(project_id=project_id, db=skill_db, llm=gateway, parameters=params)
-                        result = await skill.safe_execute(ctx)
-                    return ct, {
-                        "success": result.success,
-                        "data": result.data,
-                        "error": result.error,
-                    }
-                except Exception as e:
-                    return ct, {"success": False, "error": str(e)}
+                async with semaphore:
+                    return await _exec_check_skill(ct, params, gateway, project_id)
 
             # Build project_facts for consistency check (same as standalone endpoint)
             project_facts = {}
@@ -478,24 +472,20 @@ async def _do_full_check(project_id: str):
                     "dimensions": analysis.dimensions,
                 }
 
-            # 15 check types with appropriate parameters
-            base_params = {"tender_text": tender_text, "bid_text": bid_text}
+            # 15 项检查及各自的补充参数（项目模式能从 Analysis 拿到上下文）
             skill_tasks = [
-                ("compliance", base_params),
-                ("disqualification", base_params),
-                ("qualification", {**base_params, "bid_deadline": bid_deadline}),
-                ("pricing", {**base_params, "max_price": max_price}),
-                ("fitScore", base_params),
-                ("deposit", base_params),
-                ("signature", base_params),
-                ("validity", base_params),
-                ("consistency", {**base_params, "project_facts": project_facts}),
-                ("duplicate", {"bid_text": bid_text, "reference_texts": []}),
-                ("mandatoryReq", base_params),
-                ("docIntegrity", base_params),
-                ("aiTextCheck", {"bid_text": bid_text}),
-                ("crossCheck", base_params),
-                ("pricingLogic", base_params),
+                (
+                    ct,
+                    _full_check_params(
+                        ct,
+                        tender_text,
+                        bid_text,
+                        bid_deadline=bid_deadline,
+                        max_price=max_price,
+                        project_facts=project_facts,
+                    ),
+                )
+                for ct in _FULL_CHECK_TYPES
             ]
 
             # Run all skills in parallel
@@ -708,6 +698,104 @@ _CHECK_SKILL_MAP = {
     "ebidSubmit": ("services.check.skills.ebid_submit_check_skill", "EbidSubmitCheckSkill"),
     "pricingLogic": ("services.check.skills.pricing_logic_check_skill", "PricingLogicCheckSkill"),
 }
+
+# ---------------------------------------------------------------------------
+# 全面检查：项目模式与上传模式共用的类型清单、参数装配与 skill 执行
+# ---------------------------------------------------------------------------
+
+# 全面检查覆盖的 15 项。两种模式共用一份清单，避免各自维护而漂移。
+_FULL_CHECK_TYPES = [
+    "compliance", "disqualification", "qualification", "pricing",
+    "fitScore", "deposit", "signature", "validity",
+    "consistency", "duplicate", "mandatoryReq", "docIntegrity",
+    "aiTextCheck", "crossCheck", "pricingLogic",
+]
+
+
+def _full_check_params(
+    check_type: str,
+    tender_text: str,
+    bid_text: str,
+    *,
+    bid_deadline: str = "",
+    max_price: float | None = None,
+    project_facts: dict | None = None,
+    reference_texts: list | None = None,
+) -> dict:
+    """按检查类型装配 skill 入参。
+
+    上传模式没有项目上下文，只给两份文本即可（补充参数走默认值）；
+    项目模式从 Analysis 取出 bid_deadline / max_price / project_facts 再传进来。
+    """
+    if check_type == "duplicate":
+        return {"bid_text": bid_text, "reference_texts": reference_texts or []}
+    if check_type == "aiTextCheck":
+        return {"bid_text": bid_text}
+
+    params: dict = {"tender_text": tender_text, "bid_text": bid_text}
+    if check_type == "qualification":
+        params["bid_deadline"] = bid_deadline
+    elif check_type == "pricing":
+        params["max_price"] = max_price
+    elif check_type == "consistency":
+        params["project_facts"] = project_facts or {}
+    return params
+
+
+async def _exec_check_skill(
+    check_type: str,
+    params: dict,
+    gateway,
+    project_id: str = "",
+) -> tuple[str, dict]:
+    """加载并执行一个检查 skill，返回 (check_type, {success, data, error})。
+
+    所有调用点统一走这里，不要再在函数体内重复写 importlib 加载逻辑：
+    上传模式曾自己写过一份，而同一函数靠后的一句 `import importlib` 使
+    importlib 成为该函数的局部名、遮蔽了模块级导入，嵌套闭包于是把它当作
+    外层自由变量读取；fullCheck 分支永远走不到那句 import，15 项检查全部抛
+    "cannot access free variable 'importlib'"，再被兜底 except 吞成 success=False，
+    前端表现为「全面检查全是异常」。
+
+    每个 skill 用自己的 DB 会话，避免并发共享同一会话。
+    """
+    skill_info = _CHECK_SKILL_MAP.get(check_type)
+    if not skill_info:
+        return check_type, {
+            "success": False,
+            "data": {},
+            "error": f"未知的检查类型: {check_type}",
+            "warnings": [],
+        }
+
+    module_path, class_name = skill_info
+    try:
+        module = importlib.import_module(module_path)
+        skill_class = getattr(module, class_name)
+        skill = skill_class()
+
+        from services.database import async_session
+
+        session_factory = async_session()
+        async with session_factory() as skill_db:
+            ctx = SkillContext(
+                project_id=project_id, db=skill_db, llm=gateway, parameters=params
+            )
+            result = await skill.safe_execute(ctx)
+        return check_type, {
+            "success": result.success,
+            "data": result.data,
+            "error": result.error,
+            "warnings": result.warnings,
+        }
+    except Exception as e:
+        return check_type, {
+            "success": False,
+            "data": {},
+            "error": str(e),
+            "warnings": [],
+        }
+
 
 # ---------------------------------------------------------------------------
 # Async single-check: mapping, helpers, worker, endpoint
@@ -1009,6 +1097,17 @@ async def upload_and_check(
     check_type: str = Form("fullCheck", description="检查类型: fullCheck/compliance/disqualification/..."),
     db: AsyncSession = Depends(get_db),
 ):
+    """上传模式检查：解析完文件立即返回 task_id，前端轮询 GET /check/task/{task_id}。
+
+    实测单项检查就要 70-80s，全面检查 15 项即便限流并发也要数分钟，同步等待必然撞上
+    axios(300s) / nginx(600s) 超时——所以和项目模式 full-check 一样改成异步任务。
+    文件解析仍在这里同步做，格式问题能立刻以 400 反馈，不必等轮询。
+
+    db 只用于 get_db 的数据库就绪门禁（DB 不可用时直接 503，而不是提交一个注定失败的任务）。
+    """
+    if check_type not in _CHECK_SKILL_MAP and check_type not in ("fullCheck", "selfcheck"):
+        raise HTTPException(status_code=400, detail=f"不支持的检查类型: {check_type}")
+
     bid_text = await _parse_uploaded_file(bid_file)
     if not bid_text.strip():
         raise HTTPException(status_code=400, detail="投标文件内容为空或无法解析")
@@ -1017,103 +1116,110 @@ async def upload_and_check(
     if tender_file:
         tender_text = await _parse_uploaded_file(tender_file)
 
-    gateway = await get_agent_gateway(db, "check")
+    bid_filename = bid_file.filename or "bid"
+    tender_filename = tender_file.filename if tender_file else None
 
-    if check_type == "fullCheck":
-        all_results: dict = {}
-        check_types = [
-            "compliance", "disqualification", "qualification", "pricing",
-            "fitScore", "deposit", "signature", "validity",
-            "consistency", "duplicate", "mandatoryReq", "docIntegrity",
-            "aiTextCheck", "crossCheck", "pricingLogic",
-        ]
-
-        async def _run_upload_skill(ct: str) -> tuple[str, dict]:
-            skill_info = _CHECK_SKILL_MAP.get(ct)
-            if not skill_info:
-                return ct, {"success": False, "error": f"未知检查类型: {ct}"}
-            module_path, class_name = skill_info
-            try:
-                module = importlib.import_module(module_path)
-                skill_class = getattr(module, class_name)
-                skill = skill_class()
-                params: dict = {"tender_text": tender_text, "bid_text": bid_text}
-                if ct == "duplicate":
-                    params = {"bid_text": bid_text, "reference_texts": []}
-                elif ct == "aiTextCheck":
-                    params = {"bid_text": bid_text}
-                # Each skill gets its own session to avoid concurrent access
-                from services.database import async_session
-                session_factory = async_session()
-                async with session_factory() as skill_db:
-                    ctx = SkillContext(project_id="", db=skill_db, llm=gateway, parameters=params)
-                    result = await skill.safe_execute(ctx)
-                return ct, {
-                    "success": result.success,
-                    "data": result.data,
-                    "error": result.error,
-                }
-            except Exception as e:
-                return ct, {"success": False, "error": str(e)}
-
-        gather_results = await asyncio.gather(
-            *[_run_upload_skill(ct) for ct in check_types],
-            return_exceptions=True,
-        )
-        for r in gather_results:
-            if isinstance(r, Exception):
-                logger.warning(f"[upload-check] skill exception: {r}")
-                continue
-            ct, result_dict = r
-            all_results[ct] = result_dict
-
-        has_critical = any(
-            r.get("data", {}).get("has_critical_issues") or r.get("data", {}).get("risk_level") == "high"
-            for r in all_results.values()
-            if r.get("success") and isinstance(r.get("data"), dict)
-        )
-
-        return {
-            "success": True,
-            "data": all_results,
-            "has_critical": has_critical,
-            "source": "upload",
-            "bid_filename": bid_file.filename,
-            "tender_filename": tender_file.filename if tender_file else None,
-        }
-
-    skill_info = _CHECK_SKILL_MAP.get(check_type)
-    if not skill_info:
-        if check_type == "selfcheck":
-            from services.check.skills.selfcheck_list_skill import SelfcheckListSkill
-            skill = SelfcheckListSkill()
-            params = {"check_results": {}}
-        else:
-            raise HTTPException(status_code=400, detail=f"不支持的检查类型: {check_type}")
-    else:
-        module_path, class_name = skill_info
-        import importlib
-        module = importlib.import_module(module_path)
-        skill_class = getattr(module, class_name)
-        skill = skill_class()
-        params = {"tender_text": tender_text, "bid_text": bid_text}
-        if check_type == "duplicate":
-            params = {"bid_text": bid_text, "reference_texts": []}
-        elif check_type == "aiTextCheck":
-            params = {"bid_text": bid_text}
-
-    ctx = SkillContext(project_id="", db=db, llm=gateway, parameters=params)
-    skill_result = await skill.safe_execute(ctx)
+    tm = TaskManager.instance()
+    task = await tm.submit(
+        "upload_check",
+        _do_upload_check,
+        check_type,
+        tender_text,
+        bid_text,
+        bid_filename,
+        tender_filename,
+    )
 
     return {
-        "success": skill_result.success,
-        "data": skill_result.data,
-        "error": skill_result.error,
-        "warnings": skill_result.warnings,
+        "task_id": task.task_id,
+        "status": "pending",
         "source": "upload",
-        "bid_filename": bid_file.filename,
-        "tender_filename": tender_file.filename if tender_file else None,
+        "check_type": check_type,
+        "bid_filename": bid_filename,
+        "tender_filename": tender_filename,
+        "message": (
+            "全面检查任务已提交（15 项，通常需 3-10 分钟），请通过 GET /check/task/{task_id} 查询进度"
+            if check_type == "fullCheck"
+            else f"{check_type} 检查任务已提交，请通过 GET /check/task/{task_id} 查询进度"
+        ),
     }
+
+
+async def _do_upload_check(
+    check_type: str,
+    tender_text: str,
+    bid_text: str,
+    bid_filename: str,
+    tender_filename: str | None,
+):
+    """后台执行上传模式检查。必须自建 DB 会话：请求级会话在响应返回后就关闭了。"""
+    from services.database import async_session
+
+    source_info = {
+        "source": "upload",
+        "bid_filename": bid_filename,
+        "tender_filename": tender_filename,
+    }
+
+    session_factory = async_session()
+    async with session_factory() as db:
+        gateway = await get_agent_gateway(db, "check")
+
+        if check_type == "fullCheck":
+            semaphore = asyncio.Semaphore(_check_max_concurrent())
+
+            async def _run(ct: str) -> tuple[str, dict]:
+                params = _full_check_params(ct, tender_text, bid_text)
+                async with semaphore:
+                    return await _exec_check_skill(ct, params, gateway)
+
+            gather_results = await asyncio.gather(
+                *[_run(ct) for ct in _FULL_CHECK_TYPES],
+                return_exceptions=True,
+            )
+
+            all_results: dict = {}
+            for r in gather_results:
+                if isinstance(r, Exception):
+                    logger.warning(f"[upload-check] skill exception: {r}")
+                    continue
+                ct, result_dict = r
+                all_results[ct] = result_dict
+
+            has_critical = any(
+                r.get("data", {}).get("has_critical_issues")
+                or r.get("data", {}).get("risk_level") == "high"
+                for r in all_results.values()
+                if r.get("success") and isinstance(r.get("data"), dict)
+            )
+
+            return {
+                "success": True,
+                "data": all_results,
+                "has_critical": has_critical,
+                **source_info,
+            }
+
+        if check_type == "selfcheck":
+            # 上传模式没有前序检查结果可汇总，沿用原行为：把空清单交给 skill 自行判断
+            from services.check.skills.selfcheck_list_skill import SelfcheckListSkill
+
+            skill = SelfcheckListSkill()
+            ctx = SkillContext(
+                project_id="", db=db, llm=gateway, parameters={"check_results": {}}
+            )
+            skill_result = await skill.safe_execute(ctx)
+            return {
+                "success": skill_result.success,
+                "data": skill_result.data,
+                "error": skill_result.error,
+                "warnings": skill_result.warnings,
+                **source_info,
+            }
+
+        params = _full_check_params(check_type, tender_text, bid_text)
+        _, result = await _exec_check_skill(check_type, params, gateway)
+        return {**result, **source_info}
 
 
 @router.post("/{project_id}/signature")

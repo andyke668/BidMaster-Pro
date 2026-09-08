@@ -65,9 +65,13 @@ x-api-env: &api-env
   # AI 解读并发度：15 个维度 ÷ 并发 = 波数，调高可近似线性提速，
   # 但要看 LLM 网关承载力（实测并发 3 + qwen3.8-max 整链约 11 分钟）。
   BMP_INTERPRET_MAX_CONCURRENT: ${BMP_INTERPRET_MAX_CONCURRENT:-3}
+  # 投标检查并发度：全面检查 15 项 ÷ 并发 = 波数（实测单项 70-80s）。
+  # 不限流会一次把 15 路请求压到网关上，触发限流后 15 项一起失败。
+  BMP_CHECK_MAX_CONCURRENT: ${BMP_CHECK_MAX_CONCURRENT:-8}
   # CORS 允许的来源（逗号分隔）
   ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
-  # Uvicorn worker 数
+  # Uvicorn worker 数。TaskManager 是进程内的，解读/生成/检查的「提交任务 + 轮询」
+  # 都依赖提交与轮询落在同一个 worker，故生产须设 1（>1 会出现轮询 404「任务不存在」）。
   UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
 
 x-api-volumes: &api-volumes
