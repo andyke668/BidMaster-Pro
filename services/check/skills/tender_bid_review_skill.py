@@ -19,6 +19,7 @@ import base64
 import io
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 
 from openpyxl import Workbook
@@ -37,6 +38,14 @@ _PRIMARY_WORDS = (
     "按未送达处理", "不满足招标文件", "不响应招标文件",
 )
 _CONTRACT_WORDS = ("违约金", "逾期违约", "履约保证金", "扣款", "解除合同", "终止合同", "连带责任", "质保金", "赔偿", "取消承包资格")
+_SCORING_WORDS = (
+    "评分", "分值", "评分标准", "评分细则", "评审标准", "评标标准", "评审因素",
+    "价格分", "技术分", "商务分", "得分", "扣分", "打分", "优", "良", "中", "差",
+)
+_SECONDARY_WORDS = (
+    "不得", "不允许", "不接受", "应当", "必须", "密封", "签章", "盖章", "签字",
+    "正本", "副本", "份数", "逾期", "送达", "保证金", "资格审查", "符合性",
+)
 _CERTIFICATION_PATTERN = re.compile(r"(营业执照|资质证书|授权书|授权函|业绩证明|检验报告|检测报告|社保|纳税|信用中国|财务报告|审计报告|投标保证金)")
 _TIME_PATTERN = re.compile(r"(投标截止|递交截止|开启时间|开标时间|保证金.*(?:时间|前)|有效期|答疑|澄清|递交.*止|提交.*止)")
 _MARK_PATTERN = re.compile(r"[★▲◆●※■◇☆]|(?<![A-Za-z0-9])\*")
@@ -218,8 +227,8 @@ class TenderBidReviewSkill(Skill):
     triggers = ["投标文件审查", "审查报告", "投标审查"]
 
     _MAX_CONCURRENT_REQUESTS = 4
-    _MAX_RELATED_BID_CHUNKS = 3
-    _MAX_BID_FALLBACK_CHUNKS = 2
+    _MAX_TENDER_CONTEXT_CHARS = 42000
+    _MAX_BID_CONTEXT_CHARS = 26000
 
     async def execute(self, ctx: SkillContext) -> SkillResult:
         tender_text = ctx.parameters.get("tender_lines", ctx.parameters.get("tender_text", ""))
@@ -232,9 +241,9 @@ class TenderBidReviewSkill(Skill):
         if not bid_text:
             return SkillResult(success=False, error="投标文件内容为空")
 
-        tender_chunks = self._make_chunks(self._to_lines(tender_text))
-        bid_chunks = self._make_chunks(self._to_lines(bid_text))
-        total_chunks = max(1, len(tender_chunks) * len(_SHEET_CONFIGS))
+        tender_lines = self._to_lines(tender_text)
+        bid_lines = self._to_lines(bid_text)
+        total_chunks = len(_SHEET_CONFIGS)
         completed_chunks = 0
         completed_dimensions = 0
         progress_lock = asyncio.Lock()
@@ -353,34 +362,38 @@ class TenderBidReviewSkill(Skill):
         llm_semaphore: asyncio.Semaphore,
         on_chunk_done,
     ) -> list[dict]:
-        tender_chunks = self._make_chunks(self._to_lines(tender_text))
-        bid_chunks = self._make_chunks(self._to_lines(bid_text))
+        tender_lines = self._to_lines(tender_text)
+        bid_lines = self._to_lines(bid_text)
+        tender_context, tender_ranges = self._dimension_tender_context(cfg["key"], tender_lines)
+        bid_context, bid_ranges = self._related_bid_context(tender_context, bid_lines)
         results: list[dict] = []
 
-        for tender_chunk in tender_chunks:
-            related_bid = self._related_bid_chunks(tender_chunk, bid_chunks)
-            selected_bid = related_bid[:self._MAX_RELATED_BID_CHUNKS]
-            if not selected_bid:
-                selected_bid = bid_chunks[:self._MAX_BID_FALLBACK_CHUNKS]
-            bid_context = "\n\n".join(chunk["text"] for chunk in selected_bid)
-            messages = [
-                {
-                    "role": "system",
-                    "content": cfg["prompt"] + "\n\n必须遵守：只输出本片段真实存在的条款；source_location 必须原样使用提供的“行X”或“行X–行Y”；不确定时保留候选并写“需人工复核”。",
-                },
-                {
-                    "role": "user",
-                    "content": f"招标文件片段（{tender_chunk['range']}）：\n{tender_chunk['text']}\n\n投标书相关片段：\n{bid_context}",
-                },
-            ]
-            async with llm_semaphore:
-                result = await ctx.llm.collect_json(messages=messages, temperature=0.1, max_tokens=16384)
-            if not isinstance(result, dict):
-                raise TypeError("模型返回的不是 JSON 对象")
-            chunk_items = result.get("items", [])
-            if isinstance(chunk_items, list):
-                results.extend(item for item in chunk_items if isinstance(item, dict))
-            await on_chunk_done()
+        messages = [
+            {
+                "role": "system",
+                "content": cfg["prompt"] + (
+                    "\n\n必须遵守：这是已经按规则定位后的完整专项上下文，不要要求更多内容；"
+                    "只输出上下文中真实存在的条款，不要编造；"
+                    "source_location 必须原样使用提供的“行X”或“行X–行Y”；"
+                    "不确定时保留候选并写“需人工复核”。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"招标文件专项上下文（{tender_ranges}）：\n{tender_context}\n\n"
+                    f"投标书相关上下文（{bid_ranges}）：\n{bid_context}"
+                ),
+            },
+        ]
+        async with llm_semaphore:
+            result = await ctx.llm.collect_json(messages=messages, temperature=0.1, max_tokens=12000)
+        if not isinstance(result, dict):
+            raise TypeError("模型返回的不是 JSON 对象")
+        items = result.get("items", [])
+        if isinstance(items, list):
+            results.extend(item for item in items if isinstance(item, dict))
+        await on_chunk_done()
         return results
 
     def _to_lines(self, text: str) -> list[tuple[int, str]]:
@@ -398,30 +411,112 @@ class TenderBidReviewSkill(Skill):
                 fallback_no += 1
         return lines
 
-    def _make_chunks(self, lines: list[tuple[int, str]]) -> list[dict]:
-        chunks: list[dict] = []
-        start = 0
-        while start < len(lines):
-            end = min(start + 90, len(lines))
-            chunks.append({
-                "range": f"行{lines[start][0]}–行{lines[end - 1][0]}",
-                "text": "\n".join(f"行{line_no}: {content}" for line_no, content in lines[start:end]),
-                "plain": "\n".join(content for _, content in lines[start:end]),
-            })
-            start += 60
-        return chunks
+    def _dimension_tender_context(self, dimension: str, lines: list[tuple[int, str]]) -> tuple[str, str]:
+        scored: list[tuple[float, int]] = []
+        for index, (_, text) in enumerate(lines):
+            score = 0.0
+            if dimension == "disqualification":
+                score += sum(6.0 for word in _PRIMARY_WORDS if word in text)
+                score += sum(1.0 for word in _SECONDARY_WORDS if word in text)
+            elif dimension == "scoring":
+                score += sum(4.0 for word in _SCORING_WORDS if word in text)
+                if re.search(r"(综合评分法|最低评标价法|评标办法|评分细则)", text):
+                    score += 8.0
+            elif dimension == "star_params":
+                score += len(_MARK_PATTERN.findall(text)) * 5.0
+                score += sum(1.0 for word in _SECONDARY_WORDS if word in text)
+            elif dimension == "materials":
+                score += 6.0 if _CERTIFICATION_PATTERN.search(text) else 0.0
+                score += sum(1.0 for word in _SECONDARY_WORDS if word in text)
+            elif dimension == "timeline":
+                score += 8.0 if _TIME_PATTERN.search(text) else 0.0
+            elif dimension == "contract_terms":
+                score += sum(6.0 for word in _CONTRACT_WORDS if word in text)
 
-    def _related_bid_chunks(self, tender_chunk: dict, bid_chunks: list[dict]) -> list[dict]:
-        tender_terms = set(re.findall(r"[\u4e00-\u9fff]{2,}", tender_chunk["plain"]))
-        scored: list[tuple[float, dict]] = []
-        for chunk in bid_chunks:
-            bid_terms = set(re.findall(r"[\u4e00-\u9fff]{2,}", chunk["plain"]))
-            if not bid_terms:
+            if re.search(r"(投标人须知|评标办法|评分细则|评审标准|商务要求|技术要求|合同条款|资格要求|投标文件格式)", text):
+                score += 1.5
+            if score > 0:
+                scored.append((score, index))
+
+        scored.sort(key=lambda pair: (-pair[0], pair[1]))
+        selected: set[int] = set()
+        budget = self._MAX_TENDER_CONTEXT_CHARS
+        selected_scores: list[tuple[float, int]] = []
+        for score, index in scored:
+            cost = len(lines[index][1])
+            if selected and cost > budget:
                 continue
-            overlap = sum(1 for term in bid_terms if term in tender_terms)
-            scored.append((overlap + len(chunk["plain"]) / 10000, chunk))
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [chunk for _, chunk in scored]
+            selected.add(index)
+            selected_scores.append((score, index))
+            budget -= cost
+            if budget <= 0:
+                break
+
+        for _, index in selected_scores:
+            for neighbor in range(index - 2, index + 3):
+                if 0 <= neighbor < len(lines):
+                    selected.add(neighbor)
+
+        if not selected:
+            selected.update(range(min(len(lines), 120)))
+        return self._render_selected_lines(lines, selected)
+
+    def _related_bid_context(self, tender_context: str, bid_lines: list[tuple[int, str]]) -> tuple[str, str]:
+        stop_terms = {"招标文件", "投标书", "投标人", "采购人", "要求", "应当", "必须"}
+        term_counts = Counter(
+            term for term in re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", tender_context)
+            if term not in stop_terms
+        )
+        bid_scores: list[tuple[float, int]] = []
+        for index, (_, text) in enumerate(bid_lines):
+            score = 0.0
+            for term, weight in term_counts.items():
+                if term in text:
+                    score += min(weight, 3.0) * (1.5 if len(term) >= 4 else 1.0)
+            if _MARK_PATTERN.search(text):
+                score += 2.0
+            if _CERTIFICATION_PATTERN.search(text):
+                score += 1.0
+            if score > 0:
+                bid_scores.append((score, index))
+
+        bid_scores.sort(key=lambda pair: (-pair[0], pair[1]))
+        selected: set[int] = set()
+        budget = self._MAX_BID_CONTEXT_CHARS
+        selected_scores: list[tuple[float, int]] = []
+        for score, index in bid_scores:
+            cost = len(bid_lines[index][1])
+            if selected and cost > budget:
+                continue
+            selected.add(index)
+            selected_scores.append((score, index))
+            budget -= cost
+            if budget <= 0:
+                break
+
+        for _, index in selected_scores[:80]:
+            for neighbor in range(index - 2, index + 3):
+                if 0 <= neighbor < len(bid_lines):
+                    selected.add(neighbor)
+
+        if not selected:
+            selected.update(range(min(len(bid_lines), 100)))
+        return self._render_selected_lines(bid_lines, selected)
+
+    def _render_selected_lines(self, lines: list[tuple[int, str]], selected: set[int]) -> tuple[str, str]:
+        groups: list[list[int]] = []
+        for index in sorted(selected):
+            if groups and index - groups[-1][-1] <= 2:
+                groups[-1].append(index)
+            else:
+                groups.append([index])
+        parts: list[str] = []
+        ranges: list[str] = []
+        for group in groups:
+            start, end = group[0], group[-1]
+            ranges.append(f"行{lines[start][0]}–行{lines[end][0]}" if start != end else f"行{lines[start][0]}")
+            parts.append("\n".join(f"行{lines[index][0]}: {lines[index][1]}" for index in group))
+        return "\n\n".join(parts), "、".join(ranges[:24]) + ("等" if len(ranges) > 24 else "")
 
     def _build_excel(
         self,
