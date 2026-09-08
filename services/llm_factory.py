@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from sqlalchemy import select
@@ -39,7 +40,11 @@ def reset_llm_gateway():
     _agent_gateways.clear()
 
 
-async def get_agent_gateway(db: AsyncSession, agent_name: str) -> LLMGateway:
+async def get_agent_gateway(
+    db: AsyncSession,
+    agent_name: str,
+    default_options: dict | None = None,
+) -> LLMGateway:
     """按「智能体模型配置」解析该 Agent 实际使用的网关。
 
     AgentConfig.config["model"] 形如 "provider_id/model_name"：
@@ -85,7 +90,8 @@ async def get_agent_gateway(db: AsyncSession, agent_name: str) -> LLMGateway:
 
     if cfg is not None and cfg.api_key:
         api_base = cfg.api_base or settings.llm_api_base
-        cache_key = ("cfg", cfg.id, model_name, api_base, str(cfg.updated_at))
+        options_key = json.dumps(default_options or {}, ensure_ascii=False, sort_keys=True)
+        cache_key = ("cfg", cfg.id, model_name, api_base, str(cfg.updated_at), options_key)
         cached = _agent_gateways.get(cache_key)
         if cached is not None:
             return cached
@@ -94,6 +100,7 @@ async def get_agent_gateway(db: AsyncSession, agent_name: str) -> LLMGateway:
             "default_model": model_name,
             "fallback_models": [],
             "max_retries": settings.llm_max_retries,
+            "default_options": default_options,
         })
         if len(_agent_gateways) > 128:
             _agent_gateways.clear()
@@ -101,7 +108,8 @@ async def get_agent_gateway(db: AsyncSession, agent_name: str) -> LLMGateway:
         logger.info(f"[llm_factory] agent={agent_name} 使用供应商配置 provider={provider_id} model={model_name} base={api_base}")
         return gw
 
-    cache_key = ("env", model_name, settings.llm_api_base)
+    options_key = json.dumps(default_options or {}, ensure_ascii=False, sort_keys=True)
+    cache_key = ("env", model_name, settings.llm_api_base, options_key)
     cached = _agent_gateways.get(cache_key)
     if cached is not None:
         return cached
@@ -110,6 +118,7 @@ async def get_agent_gateway(db: AsyncSession, agent_name: str) -> LLMGateway:
         "default_model": model_name,
         "fallback_models": [],
         "max_retries": settings.llm_max_retries,
+        "default_options": default_options,
     })
     if len(_agent_gateways) > 128:
         _agent_gateways.clear()

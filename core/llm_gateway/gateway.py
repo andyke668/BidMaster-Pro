@@ -26,6 +26,7 @@ class LLMGateway:
         self.default_model = config.get("default_model", "deepseek/deepseek-chat")
         self.fallback_models = config.get("fallback_models", [])
         self.max_retries = config.get("max_retries", 2)
+        self.default_options = dict(config.get("default_options") or {})
         self.json_repair = JsonRepairEngine()
         self._token_usage: deque[dict] = deque(maxlen=10000)  # 限制最大存储量，防止内存泄漏
 
@@ -77,6 +78,7 @@ class LLMGateway:
         stream: bool = False,
         response_format: dict | None = None,
         max_tokens: int | None = None,
+        extra_body: dict | None = None,
     ) -> str | AsyncGenerator[str, None]:
         """调用 LLM 获取文本响应。
 
@@ -112,6 +114,9 @@ class LLMGateway:
                 }
                 if response_format:
                     kwargs["response_format"] = response_format
+                extra_options = {**self.default_options, **(extra_body or {})}
+                if extra_options:
+                    kwargs["extra_body"] = extra_options
 
                 if stream:
                     response = await self._client.chat.completions.create(**kwargs, stream=True)

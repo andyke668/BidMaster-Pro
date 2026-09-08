@@ -1156,7 +1156,11 @@ async def _do_tender_bid_review(
 
     session_factory = async_session()
     async with session_factory() as skill_db:
-        gateway = await get_agent_gateway(skill_db, "check")
+        gateway = await get_agent_gateway(
+            skill_db,
+            "check",
+            default_options={"chat_template_kwargs": {"enable_thinking": False}},
+        )
         skill = TenderBidReviewSkill()
         ctx = SkillContext(
             project_id="",

@@ -273,6 +273,7 @@ class TenderBidReviewSkill(Skill):
                     bid_text,
                     llm_semaphore=llm_semaphore,
                     on_chunk_done=complete_chunk,
+                    disable_thinking=True,
                 )
             except Exception as exc:
                 result = exc
@@ -361,6 +362,7 @@ class TenderBidReviewSkill(Skill):
         *,
         llm_semaphore: asyncio.Semaphore,
         on_chunk_done,
+        disable_thinking: bool = False,
     ) -> list[dict]:
         tender_lines = self._to_lines(tender_text)
         bid_lines = self._to_lines(bid_text)
@@ -387,7 +389,12 @@ class TenderBidReviewSkill(Skill):
             },
         ]
         async with llm_semaphore:
-            result = await ctx.llm.collect_json(messages=messages, temperature=0.1, max_tokens=12000)
+            result = await ctx.llm.collect_json(
+                messages=messages,
+                temperature=0.1,
+                max_tokens=12000,
+                extra_body={"chat_template_kwargs": {"enable_thinking": not disable_thinking}},
+            )
         if not isinstance(result, dict):
             raise TypeError("模型返回的不是 JSON 对象")
         items = result.get("items", [])
