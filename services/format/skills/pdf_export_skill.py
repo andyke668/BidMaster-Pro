@@ -151,21 +151,26 @@ class PdfExportSkill(Skill):
         work_dir = output_dir or str(Path(input_path).parent)
 
         try:
-            cmd = [
-                soffice_cmd,
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                work_dir,
-                input_path,
-            ]
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            # 每次转换用独立 UserInstallation profile：
+            # 多 worker 并发时共用默认 profile 会撞锁导致第二次调用直接失败，
+            # 且容器内 HOME 未必可写（与 doc_export_skill 保持一致）
+            with tempfile.TemporaryDirectory(prefix="bmp_pdf_") as profile_dir:
+                cmd = [
+                    soffice_cmd,
+                    f"-env:UserInstallation=file://{profile_dir.replace(os.sep, '/')}",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    work_dir,
+                    input_path,
+                ]
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
 
             if proc.returncode != 0:
                 return {

@@ -54,6 +54,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #   curl                — healthcheck
 #   tzdata              — 时区
 #   antiword/catdoc     — 老式 .doc（Word 97-2003 二进制）文本提取，catdoc 兜底 WPS 变体
+#   libreoffice-writer-nogui — docx → doc/pdf 无头转换；导出 .doc 的唯一可行方案
+#                              （pandoc 无 doc writer，docx2pdf 依赖 Windows/MS Word）
+#   fonts-noto-cjk      — LibreOffice 转 PDF 所需中日韩字体，缺失会整篇输出豆腐块
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         libjpeg62-turbo \
@@ -67,6 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata \
         antiword \
         catdoc \
+        libreoffice-writer-nogui \
+        fonts-noto-cjk \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && rm -rf /var/lib/apt/lists/*
 
