@@ -108,7 +108,8 @@ class TaskManager:
             task.status = TaskStatus.RUNNING
             task.started_at = time.monotonic()
             try:
-                result = await coro_fn(*args, **kwargs)
+                coro_kwargs = {key: value for key, value in kwargs.items() if key != "task_id"}
+                result = await coro_fn(*args, **coro_kwargs)
                 task.result = result
                 task.status = TaskStatus.COMPLETED
                 task.progress = 1.0
