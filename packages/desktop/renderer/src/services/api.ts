@@ -264,7 +264,7 @@ export const generateApi = {
     const applyFormat = opts.applyFormat ?? true;
     return api.get(
       `/generate/${projectId}/export-docx?fmt=${fmt}&template=${template}&apply_format=${applyFormat}`,
-      { responseType: 'blob' },
+      { responseType: 'blob', timeout: 600000 },
     );
   },
   getProjectStatus: (projectId: string) =>

@@ -130,6 +130,7 @@ export default function GeneratePage() {
   const [contentViewMode, setContentViewMode] = useState<'preview' | 'source' | 'edit'>('preview');
   const [editingContent, setEditingContent] = useState<string>('');
   const [savingContent, setSavingContent] = useState(false);
+  const [exportingDocx, setExportingDocx] = useState(false);
   const [scoreCoverage, setScoreCoverage] = useState<Record<string, unknown> | null>(null);
   const [activeSection, setActiveSection] = useState<'structure' | 'coverage' | 'outline' | 'generate'>('structure');
   const [initialSectionResolved, setInitialSectionResolved] = useState(false);
@@ -919,6 +920,28 @@ export default function GeneratePage() {
       setError(e instanceof Error ? e.message : 'AI配图生成失败');
     } finally {
       setAiImageLoading(false);
+    }
+  };
+
+  const handleExportDocx = async () => {
+    if (!selectedProjectId) return;
+    setExportingDocx(true);
+    setError('');
+    try {
+      const res = await generateApi.exportDocx(selectedProjectId);
+      const blob = new Blob([res.data as unknown as BlobPart], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const projectName = projects.find(p => p.id === selectedProjectId)?.name || 'bid';
+      a.download = `${projectName}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      console.error('导出Word失败', e);
+      setError(e instanceof Error ? e.message : '导出Word失败');
+    } finally {
+      setExportingDocx(false);
     }
   };
 
@@ -1913,8 +1936,8 @@ export default function GeneratePage() {
                   <button onClick={() => { setEditingContent(selectedChapterContent); setContentViewMode('edit'); }} style={{ padding: '4px 10px', fontSize: '12px', border: '1px solid var(--color-border)', borderLeft: 'none', borderRadius: '0 4px 4px 0', cursor: 'pointer', background: contentViewMode === 'edit' ? '#d97706' : 'white', color: contentViewMode === 'edit' ? 'white' : 'var(--color-text)' }}>
                     <Edit3 size={12} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }} />编辑
                   </button>
-                  <button onClick={() => { if (!selectedProjectId) return; window.open(`/api/projects/${selectedProjectId}/export/word`, '_blank'); }} style={{ padding: '4px 10px', fontSize: '12px', border: '1px solid #059669', borderRadius: '4px', cursor: 'pointer', background: '#ecfdf5', color: '#059669', marginLeft: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    <Download size={12} /> 下载Word文档
+                  <button onClick={handleExportDocx} disabled={!selectedProjectId || exportingDocx} style={{ padding: '4px 10px', fontSize: '12px', border: '1px solid #059669', borderRadius: '4px', cursor: !selectedProjectId || exportingDocx ? 'not-allowed' : 'pointer', background: '#ecfdf5', color: '#059669', marginLeft: '8px', display: 'flex', alignItems: 'center', gap: '4px', opacity: exportingDocx ? 0.6 : 1 }}>
+                    {exportingDocx ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />} {exportingDocx ? '导出中...' : '下载Word文档'}
                   </button>
                 </div>
               </div>
