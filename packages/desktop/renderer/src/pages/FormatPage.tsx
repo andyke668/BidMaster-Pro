@@ -358,6 +358,18 @@ export default function FormatPage() {
     }
   };
 
+  // /format、/check-format、/diff-format、/beautify 四个接口都返回 { success, data: {...} }，
+  // 真正的载荷嵌在 data 里；success=false 时错误文案在 error 里。
+  const unwrapResult = (payload: unknown): Record<string, unknown> | null => {
+    const body = (payload ?? {}) as Record<string, unknown>;
+    if (body.success === false) {
+      setError(typeof body.error === 'string' ? body.error : '处理失败');
+      return null;
+    }
+    const inner = body.data;
+    return (inner && typeof inner === 'object' ? inner : body) as Record<string, unknown>;
+  };
+
   const handleExecute = async () => {
     if (sourceMode === 'file' && !file) {
       setError('请先上传文件');
@@ -399,18 +411,18 @@ export default function FormatPage() {
       }
       if (mode === 'check') {
         const res = await formatApi.checkFormat(file!, template);
-        setCheckResult(res.data);
+        setCheckResult(unwrapResult(res.data));
       } else if (mode === 'diff') {
         const res = await formatApi.diffFormat(file!, template);
-        setDiffResult(res.data);
+        setDiffResult(unwrapResult(res.data));
       } else if (mode === 'beautify') {
         const res = await formatApi.beautify(file!);
-        setBeautifyResult(res.data);
+        setBeautifyResult(unwrapResult(res.data));
       } else {
         const res = await formatApi.format(file!, template, 'format');
-        setFormatResult(res.data);
-        const out = (res.data as Record<string, unknown>)?.output_path as string || '';
-        setLastOutputPath(out);
+        const payload = unwrapResult(res.data);
+        setFormatResult(payload);
+        setLastOutputPath((payload?.output_path as string) || '');
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : '操作失败');

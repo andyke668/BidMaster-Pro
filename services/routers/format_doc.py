@@ -506,12 +506,16 @@ async def delete_template(template_name: str):
 @router.get("/download")
 async def download_formatted_file(path: str):
     """下载由 /format 产生的产物（限定 uploads/formatted 目录）。"""
-    p = Path(path)
-    if not p.is_absolute():
-        p = (UPLOAD_DIR / path).resolve()
-    if not str(p.resolve()).startswith(str(UPLOAD_DIR.resolve())):
+    root = UPLOAD_DIR.resolve()
+    raw = Path(path)
+    # 调用方既可能传裸文件名，也可能传已含 uploads/formatted 前缀的相对路径
+    # （skill 返回的 output_path 就是后者），无条件拼 UPLOAD_DIR 会把前缀重复一次。
+    candidates = [raw.resolve()] if raw.is_absolute() else [(UPLOAD_DIR / path).resolve(), raw.resolve()]
+    inside = [c for c in candidates if c.is_relative_to(root)]
+    if not inside:
         raise HTTPException(status_code=400, detail="非法路径")
-    if not p.exists() or not p.is_file():
+    p = next((c for c in inside if c.is_file()), None)
+    if p is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     return StreamingResponse(
         p.open("rb"),
