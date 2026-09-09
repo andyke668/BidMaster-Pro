@@ -16,6 +16,8 @@ type ReviewDimension =
   | 'projectInfo'
   | 'disqualification'
   | 'scoring'
+  | 'pricing'
+  | 'delivery'
   | 'starParams'
   | 'materials'
   | 'timeline'
@@ -26,6 +28,8 @@ const dimensionLabels: Record<ReviewDimension, string> = {
   projectInfo: '项目信息抽取',
   disqualification: '废标项扫描',
   scoring: '评分项对照',
+  pricing: '分项报价核对',
+  delivery: '交付时间对比',
   starParams: '▲参数核对',
   materials: '证明材料对照',
   timeline: '时间节点核对',

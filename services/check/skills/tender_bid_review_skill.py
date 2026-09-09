@@ -63,7 +63,8 @@ _SHEET_CONFIGS = [
     "value": "完整字段值"
   }
 ]}
-至少尝试提取：项目名称、采购代理编号、采购人、采购代理机构、投标截止时间、开标时间、最高限价。""",
+至少尝试提取：项目名称、项目编号、采购代理编号、采购人、采购代理机构、投标人名称、项目单位/学校名称、项目地点、预算金额、最高限价、报价方式、投标截止时间、开标时间、开标地点、评标办法、质保期、履约地点、联系人、联系电话。
+投标人名称优先从投标书上下文中的封面、投标函、开标一览表、营业执照信息提取；项目单位/学校名称优先从项目名称、采购人、合同条款和用户需求提取。""",
     },
     {
         "key": "disqualification",
@@ -218,6 +219,48 @@ _SHEET_CONFIGS = [
   }
 ]}""",
     },
+    {
+        "key": "pricing",
+        "title": "分项报价",
+        "color": "92D050",
+        "columns": ["序号", "服务名称", "数量", "单价", "小计", "核对结果"],
+        "prompt": """你是投标报价核对专家。从招标文件中提取采购需求、报价明细表、分项报价表、预算或最高限价中的服务/货物项，并从投标书中查找对应分项报价。
+
+只提取上下文中真实出现的报价项；找不到对应投标单价时保留空值，不要编造。核对结果必须说明“已找到/缺失/不一致/待人工复核”。
+
+返回JSON:
+{"items": [
+  {
+    "seq": 1,
+    "服务名称": "服务或货物名称",
+    "数量": "招标要求的数量或单位",
+    "单价": "投标书中的单价，未找到填“未找到”",
+    "小计": "投标书中的小计或总价，未找到填“未找到”",
+    "核对结果": "已找到/缺失/不一致/待人工复核及简要原因"
+  }
+]}""",
+    },
+    {
+        "key": "delivery",
+        "title": "交付时间对比",
+        "color": "0070C0",
+        "columns": ["序号", "事项", "招标要求", "投标承诺", "差异", "风险等级"],
+        "prompt": """你是交付与履约时间核对专家。从招标文件中提取交付期、工期、实施期、上线时间、试运行、验收时间、服务期、响应时间等要求，并从投标书中查找对应承诺。
+
+全量原则：每个独立交付或履约时间要求单独一行。必须区分“未承诺”“一致”“提前”“延迟”“模糊”。风险等级用 high/medium/low。
+
+返回JSON:
+{"items": [
+  {
+    "seq": 1,
+    "事项": "交付/实施/验收/服务期等事项",
+    "招标要求": "完整时间要求",
+    "投标承诺": "投标书中的时间承诺，未找到填“未承诺”",
+    "差异": "一致/提前/延迟/模糊/未承诺及说明",
+    "风险等级": "high/medium/low"
+  }
+]}""",
+    },
 ]
 
 _PRIMARY_WORDS = (
@@ -322,6 +365,20 @@ class TenderBidReviewSkill(Skill):
                 dimension_data[cfg["key"]] = result
 
         guard_rows = self._scan_guardrails(self._to_lines(tender_text))
+        company_candidates = [
+            str(item.get("value", "")).strip()
+            for item in dimension_data["project_info"]
+            if isinstance(item, dict) and any(word in str(item.get("label", "")) for word in ("投标人", "供应商", "公司名称"))
+        ]
+        school_candidates = [
+            str(item.get("value", "")).strip()
+            for item in dimension_data["project_info"]
+            if isinstance(item, dict) and any(word in str(item.get("label", "")) for word in ("采购人", "项目单位", "学校名称", "大学", "学院"))
+        ]
+        detected_company = next((value for value in company_candidates if value), "")
+        detected_school = next((value for value in school_candidates if value), "")
+        output_company = company_name or detected_company
+        output_school = school_name or detected_school
         covered = {
             cfg["key"]: {
                 line_no
@@ -342,8 +399,8 @@ class TenderBidReviewSkill(Skill):
             dimension_data,
             self._template_headers(),
             self._item_key,
-            company_name,
-            school_name,
+            output_company,
+            output_school,
         )
         review_counts = {key: len(items) for key, items in dimension_data.items() if key != "project_info"}
         total_items = sum(review_counts.values())
@@ -362,7 +419,7 @@ class TenderBidReviewSkill(Skill):
             success=True,
             data={
                 "excel_base64": excel_bytes,
-                "file_name": f"投标文件审查_{company_name}_{school_name}.xlsx",
+                "file_name": f"投标文件审查_{output_company}_{output_school}.xlsx",
                 "total_items": total_items,
                 "high_count": high_count,
                 "guardrail_missing": guardrail_missing,
@@ -389,8 +446,20 @@ class TenderBidReviewSkill(Skill):
         bid_lines = self._to_lines(bid_text)
         if cfg["key"] == "project_info":
             selected = set(range(min(len(tender_lines), 400)))
+            for index, (_, text) in enumerate(tender_lines):
+                if any(word in text for word in (
+                        "项目名称", "项目编号", "采购代理编号", "采购人", "采购代理机构",
+                        "投标人名称", "投标函", "开标一览表", "预算金额", "最高限价",
+                        "报价方式", "评标办法", "质保期", "履约地点", "联系人", "联系电话",
+                        "学校", "大学", "学院",
+                )):
+                    selected.add(index)
             tender_context, tender_ranges = self._render_selected_lines(tender_lines, selected)
-            bid_context, bid_ranges = "", "无"
+            bid_selected = set(range(min(len(bid_lines), 500)))
+            for index, (_, text) in enumerate(bid_lines):
+                if any(word in text for word in ("投标人名称", "投标人", "供应商名称", "投标函", "开标一览表", "公司名称", "营业执照")):
+                    bid_selected.add(index)
+            bid_context, bid_ranges = self._render_selected_lines(bid_lines, bid_selected)
         else:
             tender_context, tender_ranges = self._dimension_tender_context(cfg["key"], tender_lines)
             bid_context, bid_ranges = self._related_bid_context(tender_context, bid_lines)
@@ -465,6 +534,12 @@ class TenderBidReviewSkill(Skill):
                 score += 8.0 if _TIME_PATTERN.search(text) else 0.0
             elif dimension == "contract_terms":
                 score += sum(6.0 for word in _CONTRACT_WORDS if word in text)
+            elif dimension == "pricing":
+                score += 3.0 if re.search(r"(分项报价|报价明细|开标一览表|单价|小计|总价|预算金额|最高限价)", text) else 0.0
+                score += 2.0 if re.search(r"(数量|服务名称|货物名称|采购需求|品目)", text) else 0.0
+            elif dimension == "delivery":
+                score += 4.0 if re.search(r"(交付时间|交付期|交货期|工期|实施期|上线时间|试运行|验收时间|服务期|响应时间)", text) else 0.0
+                score += 1.0 if _TIME_PATTERN.search(text) else 0.0
 
             if re.search(r"(投标人须知|评标办法|评分细则|评审标准|商务要求|技术要求|合同条款|资格要求|投标文件格式)", text):
                 score += 1.5
@@ -510,6 +585,10 @@ class TenderBidReviewSkill(Skill):
                 score += 2.0
             if _CERTIFICATION_PATTERN.search(text):
                 score += 1.0
+            if re.search(r"(单价|小计|总价|报价明细|分项报价|开标一览表)", text):
+                score += 2.0
+            if re.search(r"(交付时间|交付期|交货期|工期|实施期|上线时间|试运行|验收时间|服务期|响应时间)", text):
+                score += 2.0
             if score > 0:
                 bid_scores.append((score, index))
 

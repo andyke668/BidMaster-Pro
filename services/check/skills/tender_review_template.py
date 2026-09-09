@@ -115,9 +115,9 @@ def rows_for(spec, data, dimension_headers, item_key) -> list[list]:
     if name == "废标项核查":
         return disqualification_checklist_rows(spec, data)
     if name == "分项报价":
-        return placeholder_rows(spec, data.get("pricing", []))
+        return placeholder_rows(spec, data.get("pricing", []), "AI未提取到结构化分项报价")
     if name == "交付时间对比":
-        return placeholder_rows(spec, data.get("delivery", []))
+        return placeholder_rows(spec, data.get("delivery", []), "AI未提取到结构化交付时间")
     if name == "时间节点":
         return milestone_rows(spec, data)
     if name == "废标项核对(BidMaster)":
@@ -127,19 +127,22 @@ def rows_for(spec, data, dimension_headers, item_key) -> list[list]:
 
 def project_info_rows(data) -> list[list]:
     info = data.get("project_info", [])
-    if not info:
-        info = [{"label": "公司名称", "value": "待补充"}, {"label": "学校名称", "value": "待补充"}]
-    return [
-        [str(item.get("label", item.get("项目", ""))), str(item.get("value", item.get("内容", "")))]
-        for item in info
-        if isinstance(item, dict)
-    ]
+    rows = []
+    seen = set()
+    for item in info:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", item.get("项目", ""))).strip()
+        value = str(item.get("value", item.get("内容", ""))).strip()
+        if not label or (label, value) in seen:
+            continue
+        seen.add((label, value))
+        rows.append([label, value])
+    return rows
 
 
 def overview_rows(spec, data) -> list[list]:
-    rows = placeholder_rows(spec, data.get("overview", []))
-    if rows:
-        return rows
+    rows = []
     dimensions = {
         "disqualification": "废标项核对",
         "scoring": "评分项分析与预测",
@@ -147,26 +150,77 @@ def overview_rows(spec, data) -> list[list]:
         "materials": "证明材料清单",
         "timeline": "时间节点核对",
         "contract_terms": "合同条款要点",
+        "pricing": "分项报价",
+        "delivery": "交付时间对比",
     }
+    total_items = 0
+    high_items = 0
+    review_items = 0
     for key, title in dimensions.items():
         items = data.get(key, [])
+        dimension_items = [item for item in items if isinstance(item, dict)]
+        total_items += len(dimension_items)
         high = sum(1 for item in items if isinstance(item, dict) and item.get("risk_level") == "high")
+        high_items += high
+        risk = "高" if high else "低"
+        if key == "disqualification":
+            unresolved = sum(1 for item in dimension_items if item.get("response_found") is False or item.get("risk_level") == "high")
+            pending = sum(1 for item in dimension_items if item.get("response_found") is not True)
+            risk = "高" if unresolved else ("中" if pending else "低")
+        elif key == "star_params":
+            negative = sum(1 for item in dimension_items if item.get("response_status") in {"negative_deviation", "missing"})
+            vague = sum(1 for item in dimension_items if item.get("response_status") == "vague")
+            risk = "高" if negative else ("中" if vague else "低")
+        elif key == "materials":
+            missing = sum(1 for item in dimension_items if item.get("included") is False)
+            pending = sum(1 for item in dimension_items if item.get("included") is not True)
+            risk = "高" if missing else ("中" if pending else "低")
+        elif key == "timeline":
+            missing = sum(1 for item in dimension_items if item.get("responded") is False)
+            pending = sum(1 for item in dimension_items if item.get("responded") is not True)
+            risk = "高" if missing else ("中" if pending else "低")
+        elif key == "pricing":
+            bad = sum(1 for item in dimension_items if any(word in str(item.get("核对结果", "")) for word in ("缺失", "不一致")))
+            pending = sum(1 for item in dimension_items if "待人工复核" in str(item.get("核对结果", "")))
+            risk = "高" if bad else ("中" if pending else "低")
+        elif key == "delivery":
+            delayed = sum(1 for item in dimension_items if any(word in str(item.get("差异", "")) for word in ("延迟", "未承诺")))
+            pending = sum(1 for item in dimension_items if any(word in str(item.get("差异", "")) for word in ("模糊", "待确认")))
+            risk = "高" if delayed else ("中" if pending else "低")
+        if key == "contract_terms":
+            finding = "重点管理中标后合同履约风险"
+        else:
+            finding = {
+                "disqualification": "存在未响应或高风险废标项，必须逐条处置" if risk != "低" else "未发现高风险废标项",
+                "scoring": "以预测得分和差距分析为准，优先补强低分项",
+                "star_params": "优先处理负偏离和模糊响应" if risk != "低" else "星号参数响应良好",
+                "materials": "存在缺失或待确认材料，需补齐证明文件" if risk != "低" else "证明材料响应完整",
+                "timeline": "存在未响应时间节点，需逐项确认" if risk != "低" else "时间节点响应完整",
+                "pricing": "存在缺失、不一致或待复核报价，需重新核对" if risk != "低" else "分项报价无明显异常",
+                "delivery": "存在未承诺、延迟或模糊交付时间，需修正承诺" if risk != "低" else "交付时间承诺无重大差异",
+            }[key]
         rows.append([
             len(rows) + 1,
             title,
-            f"{title}共 {len(items)} 条",
-            "高" if high else "低",
+            f"提取 {len(dimension_items)} 条" + (f"，高风险 {high} 条" if high else ""),
+            risk,
             "AI 全量审查结果",
-            "高风险项可能导致响应失败" if high else "低风险，可正常评审",
-            "优先处理高风险项" if high else "保持现有响应材料",
+            finding,
+            "优先处理高风险项" if risk == "高" else ("递交前人工复核待确认项" if risk == "中" else "保持现有响应材料"),
         ])
+        if key != "contract_terms":
+            review_items += len(dimension_items)
+    data["_summary_stats"] = [{
+        "审查维度数": str(len(rows)),
+        "审查条目数": str(review_items),
+        "高风险条目数": str(high_items),
+        "总提取条目数": str(total_items),
+    }]
     return rows or [[1, "审查结果", "本轮未提取到结构化风险", "低", "全量审查", "暂无", "仍建议递交前人工复核"]]
 
 
 def disqualification_checklist_rows(spec, data) -> list[list]:
-    rows = placeholder_rows(spec, data.get("disqualification_summary", []))
-    if rows:
-        return rows
+    rows = []
     for item in data.get("disqualification", []):
         if not isinstance(item, dict):
             continue
@@ -185,9 +239,7 @@ def disqualification_checklist_rows(spec, data) -> list[list]:
 
 
 def milestone_rows(spec, data) -> list[list]:
-    rows = placeholder_rows(spec, data.get("milestones", []))
-    if rows:
-        return rows
+    rows = []
     for item in data.get("timeline", []):
         if not isinstance(item, dict):
             continue
@@ -214,6 +266,12 @@ def dimension_rows(key, headers, data, item_key) -> list[list]:
                 value = max(score - predicted, 0) if score is not None and predicted is not None else ""
             if key == "scoring" and header == "响应状态":
                 value = {"answered": "已响应", "partial": "部分响应", "missing": "未响应"}.get(value, value or "待确认")
+            if key == "star_params" and header == "响应状态":
+                value = {"compliant": "已响应", "negative_deviation": "负偏离", "vague": "模糊响应", "missing": "未响应"}.get(value, value or "待确认")
+            if key in {"disqualification", "materials", "timeline"} and header in {"投标书是否响应", "投标书是否包含"}:
+                value = "是" if value is True else "否" if value is False else "待确认"
+            if key == "delivery" and header == "风险等级":
+                value = {"high": "高", "medium": "中", "low": "低"}.get(value, value or "待确认")
             if key == "scoring" and header == "预测得分" and value == "":
                 value = "待补充单一预测得分"
             row.append("" if value is None else value)
@@ -221,7 +279,7 @@ def dimension_rows(key, headers, data, item_key) -> list[list]:
     return result
 
 
-def placeholder_rows(spec, items) -> list[list]:
+def placeholder_rows(spec, items, fallback_text="AI未提取到结构化数据") -> list[list]:
     result = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -233,7 +291,7 @@ def placeholder_rows(spec, items) -> list[list]:
                 value = "是" if value else "否"
             row.append("" if value is None else value)
         result.append(row)
-    return result or [[1] + ["待补充"] * (len(spec["headers"]) - 1)]
+    return result or [[1] + [fallback_text] * (len(spec["headers"]) - 1)]
 
 
 def risk_level(row) -> str:
