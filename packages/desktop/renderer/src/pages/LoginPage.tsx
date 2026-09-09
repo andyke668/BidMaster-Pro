@@ -7,8 +7,8 @@ import logoImg from '../assets/logo.png';
 export default function LoginPage() {
   const navigate = useNavigate();
   const { setUser, setToken } = useAppStore();
-  const [email, setEmail] = useState('admin@bidmaster.com');
-  const [password, setPassword] = useState('admin123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -92,9 +92,6 @@ export default function LoginPage() {
           <h1 style={{ fontSize: '24px', fontWeight: 700, color: '#0f172a', margin: 0 }}>
             智多星标书辅助系统
           </h1>
-          <p style={{ fontSize: '14px', color: '#64748b', marginTop: '8px' }}>
-            Resourceful Star · 全流程智能招投标平台
-          </p>
         </div>
 
         <form onSubmit={handleLogin}>
@@ -172,12 +169,6 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div style={{
-          marginTop: '24px', textAlign: 'center',
-          fontSize: '12px', color: '#94a3b8',
-        }}>
-          默认管理员: admin@bidmaster.pro / admin123
-        </div>
       </div>
 
       {/* CSS Animations */}
