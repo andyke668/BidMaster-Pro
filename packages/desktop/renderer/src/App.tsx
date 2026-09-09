@@ -56,6 +56,7 @@ export default function App() {
         <Route path="/format" element={<PermissionRoute module="format"><FormatPage /></PermissionRoute>} />
         <Route path="/news" element={<PermissionRoute module="news"><NewsPage /></PermissionRoute>} />
         <Route path="/settings" element={<PermissionRoute module="settings"><SettingsPage /></PermissionRoute>} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>
   );

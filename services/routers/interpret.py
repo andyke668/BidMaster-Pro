@@ -9,12 +9,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from services.database import get_db
-from services.middleware.rbac_middleware import get_current_user
-from services.models import Project, Document, Analysis, ProjectStatus
+from services.middleware.rbac_middleware import get_current_user, require_permission
+from services.models import Project, Document, Analysis, ProjectStatus, User
 from services.llm_factory import get_agent_gateway
 from core.task_manager import TaskManager
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
+
+
+async def _get_owned_project(
+    project_id: str,
+    current_user: User,
+    db: AsyncSession,
+) -> Project:
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    return project
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".wps", ".md"}
@@ -51,11 +65,9 @@ async def upload_tender_file(
     project_id: str,
     files: list[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.upload")),
 ):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = await _get_owned_project(project_id, current_user, db)
 
     upload_dir = Path(f"./projects/{project_id}")
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -98,11 +110,18 @@ async def upload_tender_file(
 
 
 @router.get("/documents/{project_id}")
-async def list_documents(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Document).where(Document.project_id == project_id).order_by(Document.created_at)
+async def list_documents(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.view")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
+    docs_result = await db.execute(
+        select(Document)
+        .where(Document.project_id == project.id)
+        .order_by(Document.created_at)
     )
-    docs = result.scalars().all()
+    docs = docs_result.scalars().all()
     return {"documents": [
         {
             "id": str(d.id),
@@ -117,11 +136,16 @@ async def list_documents(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/document/{document_id}")
-async def get_document_content(document_id: str, db: AsyncSession = Depends(get_db)):
+async def get_document_content(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.view")),
+):
     result = await db.execute(select(Document).where(Document.id == document_id))
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(status_code=404, detail="文档不存在")
+    await _get_owned_project(doc.project_id, current_user, db)
 
     content_preview = None
     if doc.parsed_content:
@@ -139,11 +163,12 @@ async def get_document_content(document_id: str, db: AsyncSession = Depends(get_
 
 
 @router.post("/parse/{project_id}")
-async def parse_tender_file(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+async def parse_tender_file(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.parse")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
 
     doc_result = await db.execute(
         select(Document).where(Document.id == project.tender_doc_id)
@@ -180,11 +205,12 @@ async def parse_tender_file(project_id: str, db: AsyncSession = Depends(get_db))
 
 
 @router.get("/analysis/{project_id}")
-async def get_analysis(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+async def get_analysis(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.view")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
 
     analysis_result = await db.execute(
         select(Analysis).where(Analysis.project_id == project.id)
@@ -231,11 +257,12 @@ async def get_analysis(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/interpret/{project_id}")
-async def interpret_tender(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+async def interpret_tender(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.parse")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
 
     doc_result = await db.execute(
         select(Document).where(Document.id == project.tender_doc_id)
@@ -258,7 +285,12 @@ async def interpret_tender(project_id: str, db: AsyncSession = Depends(get_db)):
     _interpret_inflight[project_id] = time.monotonic()
 
     tm = TaskManager.instance()
-    task = await tm.submit("tender_interpret", _do_interpret_tender, project_id)
+    task = await tm.submit(
+        "tender_interpret",
+        _do_interpret_tender,
+        project_id,
+        owner_id=current_user.id,
+    )
 
     return {
         "task_id": task.task_id,
@@ -269,12 +301,17 @@ async def interpret_tender(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/task/{task_id}")
-async def get_interpret_task_status(task_id: str):
+async def get_interpret_task_status(
+    task_id: str,
+    current_user: User = Depends(require_permission("interpret.view")),
+):
     task = TaskManager.instance().get_task(task_id)
     if not task:
         # TaskManager 是进程内的，uvicorn 多 worker 时轮询可能落到另一个 worker。
         # 这里返回 unknown 而非 404，让前端回退到 DB 支撑的 /interpret/analysis 轮询。
         return {"task_id": task_id, "status": "unknown"}
+    if task.owner_id and task.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
     return task.to_dict()
 
 
@@ -347,11 +384,12 @@ async def _do_interpret_tender(project_id: str):
 
 
 @router.post("/scoring-matrix/{project_id}")
-async def build_scoring_matrix(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+async def build_scoring_matrix(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.parse")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
 
     analysis_result = await db.execute(
         select(Analysis).where(Analysis.project_id == project.id)
@@ -385,11 +423,12 @@ async def build_scoring_matrix(project_id: str, db: AsyncSession = Depends(get_d
 
 
 @router.post("/risk-alert/{project_id}")
-async def risk_alert(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+async def risk_alert(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.parse")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
 
     doc_result = await db.execute(
         select(Document).where(Document.id == project.tender_doc_id)
@@ -422,13 +461,11 @@ async def export_interpret(
     project_id: str,
     format: str = "markdown",
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("interpret.view")),
 ):
     from fastapi.responses import PlainTextResponse
 
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = await _get_owned_project(project_id, current_user, db)
 
     analysis_result = await db.execute(
         select(Analysis).where(Analysis.project_id == project.id)

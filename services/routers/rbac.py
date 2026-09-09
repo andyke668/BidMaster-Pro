@@ -18,9 +18,14 @@ from services.models import (
     RBACUserRole,
     RBACRolePermission,
 )
-from services.middleware.rbac_middleware import get_current_user
+from services.middleware.rbac_middleware import get_current_user, require_permission
 
-router = APIRouter(dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    dependencies=[
+        Depends(get_current_user),
+        Depends(require_permission("settings.rbac")),
+    ]
+)
 
 
 class RoleCreate(BaseModel):
@@ -138,6 +143,15 @@ DEFAULT_ROLES = {
             "generate.review",
             "check.run", "check.export", "check.report",
             "format.run",
+        ],
+    },
+    "bid_checker": {
+        "display_name": "标书检查员",
+        "is_system": False,
+        "permissions": [
+            "project.create", "project.read",
+            "interpret.upload", "interpret.parse", "interpret.view",
+            "check.run", "check.export", "check.report",
         ],
     },
 }
@@ -376,7 +390,10 @@ async def create_user(data: UserCreate, db: AsyncSession = Depends(get_db)):
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="邮箱已存在")
 
-    pw_hash = _hash_password(data.password) if data.password else None
+    if not data.password:
+        raise HTTPException(status_code=400, detail="请设置登录密码")
+
+    pw_hash = _hash_password(data.password)
     user = User(
         email=data.email,
         name=data.name,

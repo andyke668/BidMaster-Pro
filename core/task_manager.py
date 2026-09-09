@@ -28,6 +28,7 @@ class TaskStatus(str, Enum):
 class AsyncTask:
     task_id: str
     task_type: str
+    owner_id: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     progress: float = 0.0
     progress_message: str = ""
@@ -93,6 +94,7 @@ class TaskManager:
         coro_fn: Callable[..., Coroutine],
         *args,
         task_id: str | None = None,
+        owner_id: str | None = None,
         **kwargs,
     ) -> AsyncTask:
         """提交异步任务并立即返回 task_id。
@@ -103,6 +105,7 @@ class TaskManager:
             *args, **kwargs: 传给 coro_fn 的参数
         """
         task = self.create_task(task_type, task_id)
+        task.owner_id = owner_id
 
         async def _run():
             task.status = TaskStatus.RUNNING

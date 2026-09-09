@@ -2,8 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   FileSearch, PenTool, ShieldCheck, FileText, Plus, ArrowRight,
-  CheckCircle2, Clock, Newspaper, FolderOpen,
-  Zap, Activity, ChevronDown, Lightbulb, AlertCircle, ShieldAlert, FileCheck,
+  CheckCircle2, Clock, FolderOpen,
+  Zap, Activity, ChevronDown, Lightbulb, AlertCircle, ShieldAlert,
 } from 'lucide-react';
 import { projectApi, type Project } from '../services/api';
 import { useAppStore } from '../stores/appStore';
@@ -34,8 +34,6 @@ const pipelineSteps = [
 const quickActions = [
   { path: '/interpret', icon: FileSearch, label: '上传招标文件', desc: '开始解读', color: '#3b82f6', bg: '#eff6ff' },
   { path: '/check', icon: ShieldAlert, label: '上传标书检查', desc: '快速检查', color: '#d97706', bg: '#fffbeb' },
-  { path: '/format', icon: FileCheck, label: '上传文档排版', desc: '一键排版', color: '#475569', bg: '#f8fafc' },
-  { path: '/news', icon: Newspaper, label: '浏览今日商机', desc: '热点资讯', color: '#059669', bg: '#ecfdf5' },
 ];
 
 const statusToStep: Record<string, number> = {

@@ -85,7 +85,7 @@ async def create_project(
 async def get_project(
     project_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("project.read")),
 ):
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
@@ -128,7 +128,7 @@ async def confirm_gate(
     project_id: str,
     stage: str,
     reviewer: str = "user",
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("project.update")),
 ):
     from core.agent_engine.gate_keeper import GateKeeper
     gk = GateKeeper()
@@ -140,7 +140,7 @@ async def confirm_gate(
 async def reset_gate(
     project_id: str,
     stage: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("project.update")),
 ):
     from core.agent_engine.gate_keeper import GateKeeper
     gk = GateKeeper()
@@ -151,7 +151,7 @@ async def reset_gate(
 @router.get("/{project_id}/gate")
 async def list_gates(
     project_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("project.read")),
 ):
     from core.agent_engine.gate_keeper import GateKeeper
     gk = GateKeeper()

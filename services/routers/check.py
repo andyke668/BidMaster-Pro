@@ -15,18 +15,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from services.database import get_db
-from services.middleware.rbac_middleware import get_current_user
+from services.middleware.rbac_middleware import get_current_user, require_permission
 from services.models import (
     Project, Document, Analysis, Chapter, CheckReport,
     ProjectStatus, CheckType,
 )
+from services.models import User
 from services.llm_factory import get_agent_gateway
 from core.skill_engine.base import SkillContext
-from core.task_manager import TaskManager
+from core.task_manager import AsyncTask, TaskManager
 from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_current_user)])
+
+
+async def _get_owned_project(
+    project_id: str,
+    current_user: User,
+    db: AsyncSession,
+) -> Project:
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.user_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="无权访问该项目")
+    return project
+
+
+async def _get_task_for_user(
+    task_id: str,
+    current_user: User,
+) -> AsyncTask:
+    task = TaskManager.instance().get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.owner_id and task.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
+    return task
 
 MAX_UPLOAD_BYTES = int(os.getenv("BMP_CHECK_MAX_UPLOAD_MB", "500")) * 1024 * 1024
 
@@ -51,12 +78,12 @@ def _check_max_concurrent() -> int:
     return max(1, min(value, 15))
 
 
-async def _get_tender_and_bid_text(project_id: str, db: AsyncSession):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-
+async def _get_tender_and_bid_text(
+    project_id: str,
+    current_user: User | None,
+    db: AsyncSession,
+):
+    project = await _get_owned_project(project_id, current_user, db)
     max_chars = get_settings().tender_text_max_chars
 
     tender_text = ""
@@ -93,8 +120,14 @@ async def _get_tender_and_bid_text(project_id: str, db: AsyncSession):
 
 
 @router.post("/{project_id}/compliance")
-async def check_compliance(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_compliance(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(
+        project_id, current_user, db
+    )
 
     if not tender_text or not bid_text:
         raise HTTPException(status_code=400, detail="招标文件或投标文件内容为空")
@@ -135,8 +168,12 @@ async def check_compliance(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/disqualification")
-async def check_disqualification(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_disqualification(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
 
     if not tender_text or not bid_text:
         raise HTTPException(status_code=400, detail="招标文件或投标文件内容为空")
@@ -186,8 +223,12 @@ async def check_disqualification(project_id: str, db: AsyncSession = Depends(get
 
 
 @router.post("/{project_id}/qualification")
-async def check_qualification(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_qualification(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
 
     from services.check.skills.qualification_check_skill import QualificationCheckSkill
 
@@ -231,8 +272,12 @@ async def check_qualification(project_id: str, db: AsyncSession = Depends(get_db
 
 
 @router.post("/{project_id}/pricing")
-async def check_pricing(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_pricing(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
 
     analysis_result = await db.execute(
         select(Analysis).where(Analysis.project_id == project.id)
@@ -283,8 +328,12 @@ async def check_pricing(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/fit-score")
-async def check_fit_score(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_fit_score(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
 
     if not tender_text or not bid_text:
         raise HTTPException(status_code=400, detail="招标文件或投标文件内容为空")
@@ -319,8 +368,12 @@ async def check_fit_score(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/selfcheck")
-async def run_selfcheck(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def run_selfcheck(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
 
     check_results = {}
 
@@ -406,19 +459,22 @@ async def run_selfcheck(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/full-check")
-async def full_check(project_id: str, db: AsyncSession = Depends(get_db)):
+async def full_check(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
     """Submit full check as async task. Returns task_id for polling."""
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = await _get_owned_project(project_id, current_user, db)
 
     project.status = ProjectStatus.CHECKING
     await db.flush()
     await db.commit()
 
     tm = TaskManager.instance()
-    task = await tm.submit("full_check", _do_full_check, project_id)
+    task = await tm.submit(
+        "full_check", _do_full_check, project_id, owner_id=current_user.id
+    )
 
     return {
         "task_id": task.task_id,
@@ -434,7 +490,7 @@ async def _do_full_check(project_id: str):
     session_factory = async_session()
     async with session_factory() as db:
         try:
-            project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+            project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, None, db)
 
             if not tender_text or not bid_text:
                 raise ValueError("招标文件或投标文件内容为空")
@@ -545,21 +601,22 @@ async def _do_full_check(project_id: str):
 
 
 @router.get("/task/{task_id}")
-async def get_check_task_status(task_id: str):
+async def get_check_task_status(
+    task_id: str,
+    current_user: User = Depends(require_permission("check.run")),
+):
     """Poll endpoint for async check tasks."""
-    tm = TaskManager.instance()
-    task = tm.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    task = await _get_task_for_user(task_id, current_user)
     return task.to_dict()
 
 
 @router.get("/{project_id}/reports")
-async def list_check_reports(project_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+async def list_check_reports(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.report")),
+):
+    project = await _get_owned_project(project_id, current_user, db)
 
     reports_result = await db.execute(
         select(CheckReport).where(CheckReport.project_id == project.id)
@@ -579,8 +636,12 @@ async def list_check_reports(project_id: str, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/{project_id}/deposit")
-async def check_deposit(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_deposit(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.deposit_check_skill import DepositCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = DepositCheckSkill()
@@ -936,7 +997,7 @@ async def _do_single_check(project_id: str, check_type: str):
 
     session_factory = async_session()
     async with session_factory() as db:
-        project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+        project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, None, db)
 
         if not tender_text or not bid_text:
             raise ValueError("招标文件或投标文件内容为空")
@@ -1065,15 +1126,13 @@ async def submit_single_check(
     project_id: str,
     body: SingleCheckRequest,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
 ):
     """Submit any single check as an async task. Returns task_id for polling."""
     check_type = body.check_type
 
     # Validate project
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
+    project = await _get_owned_project(project_id, current_user, db)
 
     # Validate check_type
     valid_types = set(_CHECK_TYPE_TO_ENUM.keys())
@@ -1084,7 +1143,13 @@ async def submit_single_check(
         )
 
     tm = TaskManager.instance()
-    task = await tm.submit("single_check", _do_single_check, project_id, check_type)
+    task = await tm.submit(
+        "single_check",
+        _do_single_check,
+        project_id,
+        check_type,
+        owner_id=current_user.id,
+    )
 
     return {
         "task_id": task.task_id,
@@ -1101,6 +1166,7 @@ async def tender_bid_review(
     company_name: str = Form("", description="投标方公司名称"),
     school_name: str = Form("", description="招标方学校名称"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
 ):
     """投标文件审查：招标文件 + 投标书六维度交叉审查，返回异步任务ID。
 
@@ -1130,6 +1196,7 @@ async def tender_bid_review(
         bid_filename,
         tender_filename,
         task_id=review_task_id,
+        owner_id=current_user.id,
     )
 
     return {
@@ -1272,7 +1339,10 @@ async def _parse_review_document(file: UploadFile) -> str:
 
 
 @router.get("/tender-bid-review/download/{file_name}")
-async def download_tender_bid_review(file_name: str):
+async def download_tender_bid_review(
+    file_name: str,
+    current_user: User = Depends(require_permission("check.export")),
+):
     """下载投标文件审查 Excel。只允许下载 bidmaster_exports 目录下文件。"""
     import tempfile
     import os
@@ -1301,6 +1371,7 @@ async def upload_and_check(
     tender_file: UploadFile | None = File(None, description="招标文件(可选，.docx/.pdf/.txt)"),
     check_type: str = Form("fullCheck", description="检查类型: fullCheck/compliance/disqualification/..."),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
 ):
     """上传模式检查：解析完文件立即返回 task_id，前端轮询 GET /check/task/{task_id}。
 
@@ -1333,6 +1404,7 @@ async def upload_and_check(
         bid_text,
         bid_filename,
         tender_filename,
+        owner_id=current_user.id,
     )
 
     return {
@@ -1428,8 +1500,12 @@ async def _do_upload_check(
 
 
 @router.post("/{project_id}/signature")
-async def check_signature(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_signature(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.signature_check_skill import SignatureCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = SignatureCheckSkill()
@@ -1443,8 +1519,12 @@ async def check_signature(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/validity")
-async def check_validity(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_validity(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.validity_check_skill import ValidityCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = ValidityCheckSkill()
@@ -1458,8 +1538,12 @@ async def check_validity(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/consistency")
-async def check_consistency(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_consistency(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.consistency_check_skill import ConsistencyCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = ConsistencyCheckSkill()
@@ -1486,8 +1570,12 @@ async def check_consistency(project_id: str, db: AsyncSession = Depends(get_db))
 
 
 @router.post("/{project_id}/duplicate")
-async def check_duplicate(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_duplicate(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.duplicate_check_skill import DuplicateCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = DuplicateCheckSkill()
@@ -1517,8 +1605,12 @@ async def check_duplicate(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/mandatory-req")
-async def check_mandatory_req(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_mandatory_req(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     if not tender_text or not bid_text:
         raise HTTPException(status_code=400, detail="招标文件或投标文件内容为空")
     from services.check.skills.mandatory_req_check_skill import MandatoryReqCheckSkill
@@ -1539,6 +1631,7 @@ async def export_check_report(
     report_id: str,
     format: str = "markdown",
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.report")),
 ):
     from fastapi.responses import PlainTextResponse
 
@@ -1547,8 +1640,7 @@ async def export_check_report(
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
 
-    project_result = await db.execute(select(Project).where(Project.id == project_id))
-    project = project_result.scalar_one_or_none()
+    project = await _get_owned_project(project_id, current_user, db)
     project_name = project.name if project else "未命名项目"
 
     from services.check.skills.check_report_export_skill import CheckReportExportSkill
@@ -1582,6 +1674,7 @@ async def get_check_report_content(
     report_id: str,
     format: str = "markdown",
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.report")),
 ):
     """直接返回报告内容(用于前端预览)，不触发下载。"""
     from services.check.skills.check_report_export_skill import CheckReportExportSkill
@@ -1592,8 +1685,7 @@ async def get_check_report_content(
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
 
-    project_result = await db.execute(select(Project).where(Project.id == project_id))
-    project = project_result.scalar_one_or_none()
+    project = await _get_owned_project(project_id, current_user, db)
     project_name = project.name if project else "未命名项目"
 
     if not report.results:
@@ -1635,8 +1727,12 @@ async def get_check_report_content(
 
 
 @router.post("/{project_id}/doc-integrity")
-async def check_doc_integrity(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_doc_integrity(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.doc_integrity_check_skill import DocIntegrityCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = DocIntegrityCheckSkill()
@@ -1650,8 +1746,12 @@ async def check_doc_integrity(project_id: str, db: AsyncSession = Depends(get_db
 
 
 @router.post("/{project_id}/ai-text-check")
-async def check_ai_text(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_ai_text(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.ai_text_check_skill import AITextCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = AITextCheckSkill()
@@ -1665,8 +1765,12 @@ async def check_ai_text(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/risk-score")
-async def check_risk_score(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_risk_score(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     reports_result = await db.execute(
         select(CheckReport).where(CheckReport.project_id == project.id)
     )
@@ -1690,8 +1794,12 @@ async def check_risk_score(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/cross-check")
-async def check_cross(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_cross(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.cross_check_skill import CrossCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = CrossCheckSkill()
@@ -1705,8 +1813,12 @@ async def check_cross(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/sample-report")
-async def check_sample_report(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_sample_report(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.sample_report_check_skill import SampleReportCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = SampleReportCheckSkill()
@@ -1720,8 +1832,12 @@ async def check_sample_report(project_id: str, db: AsyncSession = Depends(get_db
 
 
 @router.post("/{project_id}/joint-bid")
-async def check_joint_bid(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_joint_bid(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.joint_bid_check_skill import JointBidCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = JointBidCheckSkill()
@@ -1735,8 +1851,12 @@ async def check_joint_bid(project_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/ebid-submit")
-async def check_ebid_submit(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_ebid_submit(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.ebid_submit_check_skill import EbidSubmitCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = EbidSubmitCheckSkill()
@@ -1750,8 +1870,12 @@ async def check_ebid_submit(project_id: str, db: AsyncSession = Depends(get_db))
 
 
 @router.post("/{project_id}/pricing-logic")
-async def check_pricing_logic(project_id: str, db: AsyncSession = Depends(get_db)):
-    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, db)
+async def check_pricing_logic(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("check.run")),
+):
+    project, tender_text, bid_text = await _get_tender_and_bid_text(project_id, current_user, db)
     from services.check.skills.pricing_logic_check_skill import PricingLogicCheckSkill
     gateway = await get_agent_gateway(db, "check")
     skill = PricingLogicCheckSkill()

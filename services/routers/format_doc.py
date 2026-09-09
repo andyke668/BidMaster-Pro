@@ -15,13 +15,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.http_headers import content_disposition
 from core.settings import get_settings
 from services.database import get_db
-from services.middleware.rbac_middleware import get_current_user
+from services.middleware.rbac_middleware import get_current_user, require_permission
 from services.llm_factory import get_agent_gateway
 from core.skill_engine.base import SkillContext
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    dependencies=[
+        Depends(get_current_user),
+        Depends(require_permission("format.run")),
+    ]
+)
 
 UPLOAD_DIR = Path("./uploads/formatted")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
