@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from services.database import get_db
+from services.middleware.rbac_middleware import get_current_user
 from services.models import (
     Project, Document, Analysis, Chapter, CheckReport,
     ProjectStatus, CheckType,
@@ -25,7 +26,7 @@ from core.task_manager import TaskManager
 from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 MAX_UPLOAD_BYTES = int(os.getenv("BMP_CHECK_MAX_UPLOAD_MB", "500")) * 1024 * 1024
 

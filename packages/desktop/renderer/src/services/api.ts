@@ -1,4 +1,4 @@
-﻿import axios from 'axios';
+import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
@@ -150,6 +150,7 @@ export interface LoginUser {
   role: string;
   avatar: string | null;
   roles: Array<{ id: string; name: string; display_name: string }>;
+  permissions: string[];
 }
 
 export const authApi = {

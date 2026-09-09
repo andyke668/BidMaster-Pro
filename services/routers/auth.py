@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database import get_db
-from services.models import User, RBACUserRole, RBACRole
+from services.models import User, RBACUserRole, RBACRole, RBACRolePermission, RBACPermission
 
 router = APIRouter()
 
@@ -100,6 +100,16 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         )
         roles = [{"id": str(r.id), "name": r.name, "display_name": r.display_name} for r in role_result.scalars().all()]
 
+    # 查询用户权限 codes
+    permissions: list[str] = []
+    if role_ids:
+        rp_result = await db.execute(
+            select(RBACPermission.code)
+            .join(RBACRolePermission, RBACRolePermission.permission_id == RBACPermission.id)
+            .where(RBACRolePermission.role_id.in_(role_ids))
+        )
+        permissions = list(set(row[0] for row in rp_result.all()))
+
     return {
         "token": token,
         "user": {
@@ -109,6 +119,7 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
             "role": user.role,
             "avatar": user.avatar,
             "roles": roles,
+            "permissions": permissions,
         },
     }
 
@@ -133,6 +144,16 @@ async def get_current_user_info(
         )
         roles = [{"id": str(r.id), "name": r.name, "display_name": r.display_name} for r in role_result.scalars().all()]
 
+    # 查询用户权限 codes
+    permissions: list[str] = []
+    if role_ids:
+        rp_result = await db.execute(
+            select(RBACPermission.code)
+            .join(RBACRolePermission, RBACRolePermission.permission_id == RBACPermission.id)
+            .where(RBACRolePermission.role_id.in_(role_ids))
+        )
+        permissions = list(set(row[0] for row in rp_result.all()))
+
     return {
         "id": str(user.id),
         "email": user.email,
@@ -140,6 +161,7 @@ async def get_current_user_info(
         "role": user.role,
         "avatar": user.avatar,
         "roles": roles,
+        "permissions": permissions,
     }
 
 

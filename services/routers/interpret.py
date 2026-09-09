@@ -9,11 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from services.database import get_db
+from services.middleware.rbac_middleware import get_current_user
 from services.models import Project, Document, Analysis, ProjectStatus
 from services.llm_factory import get_agent_gateway
 from core.task_manager import TaskManager
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".wps", ".md"}

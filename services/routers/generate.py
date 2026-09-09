@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from services.database import get_db
+from services.middleware.rbac_middleware import get_current_user
 from services.models import Project, Document, Analysis, Outline, Chapter, ProjectStatus
 from services.llm_factory import get_agent_gateway
 from core.http_headers import content_disposition
@@ -25,7 +26,7 @@ from core.skill_engine.base import SkillContext
 from core.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 @router.get("/task/{task_id}")
