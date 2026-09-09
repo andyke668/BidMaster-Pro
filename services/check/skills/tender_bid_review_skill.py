@@ -1,6 +1,6 @@
-"""投标文件审查技能 - 基于 tender-review-kit 逻辑
+"""投标文件审查技能 - 基于 tender-review-kit 固定 12 页模板
 
-分别对照招标文件和投标书，从六个维度做交叉审查：
+项目信息 + 六大审查维度交叉对照：
 1. 废标项核对（否决/无效条款逐条比对）
 2. 评分项响应（评分标准逐项找响应）
 3. ▲参数核对（星号/三角标强制性参数）
@@ -15,18 +15,14 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import io
 import logging
 import re
 from collections import Counter
 from datetime import datetime
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-
 from core.skill_engine.base import Skill, SkillContext, SkillResult
+from services.check.skills.tender_review_template import TEMPLATE as REVIEW_TEMPLATE
+from services.check.skills.tender_review_template import build_excel as build_template_excel
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +47,24 @@ _TIME_PATTERN = re.compile(r"(投标截止|递交截止|开启时间|开标时�
 _MARK_PATTERN = re.compile(r"[★▲◆●※■◇☆]|(?<![A-Za-z0-9])\*")
 
 _SHEET_CONFIGS = [
+    {
+        "key": "project_info",
+        "title": "项目信息",
+        "color": "1F4E78",
+        "columns": ["项目", "内容"],
+        "prompt": """你是招标文件基础信息抽取专家。从招标文件开头、投标人须知、采购公告和项目说明中提取项目基础信息。
+
+全量原则：只提取上下文中真实存在的字段；找不到填空字符串，不要编造。
+
+返回JSON:
+{"items": [
+  {
+    "label": "项目名称",
+    "value": "完整字段值"
+  }
+]}
+至少尝试提取：项目名称、采购代理编号、采购人、采购代理机构、投标截止时间、开标时间、最高限价。""",
+    },
     {
         "key": "disqualification",
         "title": "废标项核对",
@@ -99,6 +113,8 @@ _SHEET_CONFIGS = [
     "category": "商务/技术/价格/其他",
     "scoring_item": "评分项名称",
     "score": 分值,
+    "predicted_score": 单一预测得分数值,
+    "predicted_reason": "基于评分标准和投标书证据的简要预测理由；不确定时写明保守扣分依据",
     "scoring_criteria": "评分标准描述",
     "response_status": "answered/partial/missing",
     "response_content": "响应内容摘要或差距分析",
@@ -204,8 +220,6 @@ _SHEET_CONFIGS = [
     },
 ]
 
-_THIN = Side(style="thin", color="D9D9D9")
-_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _PRIMARY_WORDS = (
     "否决", "被否决", "予以否决", "拒收", "无效投标", "废标", "不予受理",
     "不予接受", "不予考虑", "取消资格", "取消中标资格", "取消投标资格",
@@ -221,9 +235,9 @@ _MARK_PATTERN = re.compile(r"[★▲◆●※■◇☆]|(?<![A-Za-z0-9])\*")
 
 class TenderBidReviewSkill(Skill):
     name = "tender_bid_review"
-    description = "投标文件审查：招标文件+投标书六维度交叉审查并导出Excel"
+    description = "投标文件审查：招标文件+投标书按固定12页模板交叉审查并导出Excel"
     category = "check"
-    version = "1.1.0"
+    version = "1.2.0"
     triggers = ["投标文件审查", "审查报告", "投标审查"]
 
     _MAX_CONCURRENT_REQUESTS = 4
@@ -324,8 +338,15 @@ class TenderBidReviewSkill(Skill):
             if hit["line"] not in covered[kind_to_key[hit["kind"]]]
         )
 
-        excel_bytes = self._build_excel(dimension_data, company_name, school_name, guard_rows, covered, kind_to_key)
-        total_items = sum(len(v) for v in dimension_data.values())
+        excel_bytes = build_template_excel(
+            dimension_data,
+            self._template_headers(),
+            self._item_key,
+            company_name,
+            school_name,
+        )
+        review_counts = {key: len(items) for key, items in dimension_data.items() if key != "project_info"}
+        total_items = sum(review_counts.values())
         high_count = sum(
             1 for items in dimension_data.values()
             for item in items if isinstance(item, dict) and item.get("risk_level") == "high"
@@ -346,7 +367,7 @@ class TenderBidReviewSkill(Skill):
                 "high_count": high_count,
                 "guardrail_missing": guardrail_missing,
                 "guardrail_total": len(guard_rows),
-                "dimension_counts": {k: len(v) for k, v in dimension_data.items()},
+                "dimension_counts": review_counts,
                 "errors": errors,
                 "generated_at": datetime.now().isoformat(),
             },
@@ -366,8 +387,13 @@ class TenderBidReviewSkill(Skill):
     ) -> list[dict]:
         tender_lines = self._to_lines(tender_text)
         bid_lines = self._to_lines(bid_text)
-        tender_context, tender_ranges = self._dimension_tender_context(cfg["key"], tender_lines)
-        bid_context, bid_ranges = self._related_bid_context(tender_context, bid_lines)
+        if cfg["key"] == "project_info":
+            selected = set(range(min(len(tender_lines), 400)))
+            tender_context, tender_ranges = self._render_selected_lines(tender_lines, selected)
+            bid_context, bid_ranges = "", "无"
+        else:
+            tender_context, tender_ranges = self._dimension_tender_context(cfg["key"], tender_lines)
+            bid_context, bid_ranges = self._related_bid_context(tender_context, bid_lines)
         results: list[dict] = []
 
         messages = [
@@ -525,113 +551,17 @@ class TenderBidReviewSkill(Skill):
             parts.append("\n".join(f"行{lines[index][0]}: {lines[index][1]}" for index in group))
         return "\n\n".join(parts), "、".join(ranges[:24]) + ("等" if len(ranges) > 24 else "")
 
-    def _build_excel(
-        self,
-        data: dict[str, list[dict]],
-        company: str,
-        school: str,
-        guard_rows: list[dict[str, str]],
-        covered: dict[str, set[int]],
-        kind_to_key: dict[str, str],
-    ) -> str:
-        wb = Workbook()
-        wb.remove(wb.active)
-
-        # 概要 sheet
-        ws = wb.create_sheet("审查概要")
-        ws.cell(1, 1, "投标文件审查报告").font = Font(bold=True, size=16, color="1F4E79")
-        ws.cell(2, 1, f"投标方：{company}").font = Font(size=12)
-        ws.cell(3, 1, f"招标方/业主：{school}").font = Font(size=12)
-        ws.cell(4, 1, f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}").font = Font(size=10, color="808080")
-        ws.cell(5, 1, "基于 tender-review-kit 全量不压缩原则 · 每条带原文出处 · 产清单不下结论").font = Font(size=9, color="808080", italic=True)
-
-        row = 7
-        ws.cell(row, 1, "审查维度").font = Font(bold=True)
-        ws.cell(row, 2, "条目数").font = Font(bold=True)
-        ws.cell(row, 3, "高风险数").font = Font(bold=True)
-        row += 1
-        for cfg in _SHEET_CONFIGS:
-            items = data.get(cfg["key"], [])
-            high = sum(1 for i in items if isinstance(i, dict) and i.get("risk_level") == "high")
-            ws.cell(row, 1, cfg["title"])
-            ws.cell(row, 2, len(items))
-            ws.cell(row, 3, high)
-            ws.cell(row, 3).font = Font(color="DC2626" if high > 0 else "059669")
-            row += 1
-
-        ws.column_dimensions["A"].width = 20
-        ws.column_dimensions["B"].width = 10
-        ws.column_dimensions["C"].width = 10
-
-        # 各维度 sheet
-        for cfg in _SHEET_CONFIGS:
-            items = data.get(cfg["key"], [])
-            ws = wb.create_sheet(cfg["title"])
-            fill = PatternFill("solid", fgColor=cfg["color"])
-            for c, col_name in enumerate(cfg["columns"], 1):
-                cell = ws.cell(1, c, col_name)
-                cell.fill = fill
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.alignment = Alignment(vertical="center", wrap_text=True)
-                cell.border = _BORDER
-            ws.row_dimensions[1].height = 24
-            ws.freeze_panes = "A2"
-
-            for r, item in enumerate(items, 2):
-                if not isinstance(item, dict):
-                    continue
-                for c in range(1, len(cfg["columns"]) + 1):
-                    key = self._item_key(cfg["key"], c)
-                    val = item.get(key, "") if key else ""
-                    if isinstance(val, bool):
-                        val = "是" if val else "否"
-                    elif val is None:
-                        val = ""
-                    elif not isinstance(val, str):
-                        val = str(val)
-                    cell = ws.cell(r, c, val)
-                    cell.alignment = Alignment(vertical="center", wrap_text=True)
-                    cell.border = _BORDER
-
-            for c in range(1, len(cfg["columns"]) + 1):
-                max_len = max(
-                    (len(str(ws.cell(r, c).value or "")) for r in range(1, len(items) + 2)),
-                    default=8,
-                )
-                ws.column_dimensions[get_column_letter(c)].width = min(max(max_len * 1.8, 10), 50)
-
-            ws.auto_filter.ref = f"A1:{get_column_letter(len(cfg['columns']))}{len(items) + 1}"
-
-        guard_sheet = wb.create_sheet("覆盖护栏")
-        guard_headers = ["护栏类别", "命中词", "原文行号", "原文摘要", "AI清单覆盖"]
-        for c, header in enumerate(guard_headers, 1):
-            cell = guard_sheet.cell(1, c, header)
-            cell.fill = PatternFill("solid", fgColor="64748B")
-            cell.font = Font(bold=True, color="FFFFFF")
-            cell.border = _BORDER
-        for r, hit in enumerate(guard_rows, 2):
-            target_key = kind_to_key[hit["kind"]]
-            is_covered = hit["line"] in covered[target_key]
-            values = [self._dimension_title(target_key), hit["word"], f"行{hit['line']}", hit["text"], "已覆盖" if is_covered else "未覆盖"]
-            for c, value in enumerate(values, 1):
-                cell = guard_sheet.cell(r, c, value)
-                cell.border = _BORDER
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
-                if c == 5 and not is_covered:
-                    cell.font = Font(color="DC2626", bold=True)
-        for c, width in enumerate([18, 16, 12, 60, 14], 1):
-            guard_sheet.column_dimensions[get_column_letter(c)].width = width
-        guard_sheet.freeze_panes = "A2"
-        guard_sheet.auto_filter.ref = f"A1:E{len(guard_rows) + 1}"
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+    def _template_headers(self) -> dict[str, list[str]]:
+        return {
+            spec["data_key"]: spec["headers"]
+            for spec in REVIEW_TEMPLATE
+            if spec["data_key"]
+        }
 
     def _item_key(self, dim_key: str, col_index: int) -> str | None:
         key_maps = {
             "disqualification": {1: "seq", 2: "clause_type", 3: "clause_content", 4: "source_location", 5: "matched_quote", 6: "response_found", 7: "response_content", 8: "risk_level", 9: "suggestion"},
-            "scoring": {1: "seq", 2: "category", 3: "scoring_item", 4: "score", 5: "scoring_criteria", 6: "response_status", 7: "response_content", 8: "suggestion"},
+            "scoring": {1: "seq", 2: "scoring_item", 3: "score", 4: "predicted_score", 5: None, 6: "predicted_reason", 7: "response_status", 8: "response_content", 9: "response_content", 10: "suggestion"},
             "star_params": {1: "seq", 2: "marker", 3: "requirement", 4: "category", 5: "response_status", 6: "response_content", 7: "deviation", 8: "suggestion"},
             "materials": {1: "seq", 2: "material_name", 3: "requirement", 4: "source_location", 5: "matched_quote", 6: "included", 7: "location", 8: "note"},
             "timeline": {1: "seq", 2: "node_type", 3: "time_value", 4: "requirement", 5: "responded", 6: "response_content", 7: "risk_note"},
