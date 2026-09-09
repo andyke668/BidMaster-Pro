@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 
@@ -356,7 +356,8 @@ if not gate_keeper.is_passed(project_id, "interpret"):
 
 ## 📝 更新日志
 
-当前版本 **v0.2.0**（2026-09-08）。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
+当前版本 **v0.3.0**（2026-09-09）。本轮新增「投标文件审查」：分别上传招标文件和投标书，六维度交叉审查后下载
+`投标文件审查_公司名称_学校名称.xlsx`；并修复审查任务进度绑定与思考模式导致的耗时问题。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
 
 > 本仓库 fork 自 [guangshu100/BidMaster-Pro](https://github.com/guangshu100/BidMaster-Pro)。`v0.2.0` 起的全部改动均为本 fork 自研，且已在内网 Docker Compose 环境（postgres + api + web）实际部署并逐项验证；其中**包含破坏性接口变更**（`upload-check` 与 AI 解读改为「提交任务 + 轮询」、生产 `UVICORN_WORKERS` 必须为 1），升级前请先读 CHANGELOG 的「破坏性变更」一节。
 
