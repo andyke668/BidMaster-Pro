@@ -27,7 +27,7 @@ from core.settings import get_settings
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB
+MAX_UPLOAD_BYTES = int(os.getenv("BMP_CHECK_MAX_UPLOAD_MB", "500")) * 1024 * 1024
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
