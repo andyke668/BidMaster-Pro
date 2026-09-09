@@ -7,12 +7,15 @@ from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, delete as sa_delete
+from sqlalchemy import select, func, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.database import get_db
 from services.models import (
     User,
+    Project,
+    Notification,
+    MonitoringTask,
     RBACRole,
     RBACPermission,
     RBACUserRole,
@@ -457,6 +460,15 @@ async def delete_user(user_id: str, db: AsyncSession = Depends(get_db)):
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if user.role == "admin":
+        raise HTTPException(status_code=400, detail="系统内置管理员不可删除")
+
+    for model in (Project, Notification, MonitoringTask):
+        linked = await db.execute(
+            select(func.count()).select_from(model).where(model.user_id == user.id)
+        )
+        if linked.scalar_one() > 0:
+            raise HTTPException(status_code=409, detail="该用户存在关联数据，请先处理其项目等业务数据后再删除")
 
     await db.execute(
         sa_delete(RBACUserRole).where(
