@@ -1678,7 +1678,7 @@ export default function SettingsPage() {
                           display: 'inline-flex', alignItems: 'center', gap: '3px',
                           opacity: isUserSystemAdmin(user.id) ? 0.6 : 1,
                         }}
-                        title={isUserSystemAdmin(user.id) ? '系统默认管理员已具备所有权限，无需分配角色' : '为该用户分配角色'}
+                        title={isUserSystemAdmin(user.id) ? '系统内置管理员已具备所有权限，无需分配角色' : '为该用户分配角色'}
                       >
                         <UserPlus size={11} /> 分配角色
                       </button>
@@ -1711,7 +1711,7 @@ export default function SettingsPage() {
                         <button
                           onClick={() => {
                             if (isUserSystemAdmin(user.id)) {
-                              setRbacMessage({ type: 'error', text: '系统默认管理员不可删除' });
+                              setRbacMessage({ type: 'error', text: '系统内置管理员不可删除' });
                               return;
                             }
                             setDeleteConfirmId(user.id);
@@ -1728,7 +1728,7 @@ export default function SettingsPage() {
                             fontSize: '12px',
                             opacity: isUserSystemAdmin(user.id) ? 0.6 : 1,
                           }}
-                          title={isUserSystemAdmin(user.id) ? '系统默认管理员不可删除' : '删除用户'}
+                          title={isUserSystemAdmin(user.id) ? '系统内置管理员不可删除' : '删除用户'}
                         >
                           删除
                         </button>
