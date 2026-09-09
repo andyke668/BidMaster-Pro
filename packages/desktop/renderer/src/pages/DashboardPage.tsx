@@ -66,6 +66,28 @@ export default function DashboardPage() {
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
   const { setCurrentProject, currentProjectId } = useAppStore();
+  const userPermissions = useAppStore((s) => s.permissions) || [];
+  const isSystemAdmin = useAppStore((s) => s.user?.roles?.some(r => r.name === 'admin') ?? false);
+
+  const hasModulePerm = (module: string) => {
+    if (isSystemAdmin) return true;
+    return userPermissions.some(p => p.startsWith(module + '.'));
+  };
+
+  const filteredPipelineSteps = pipelineSteps.filter(step => {
+    if (step.path === '/interpret') return hasModulePerm('interpret');
+    if (step.path === '/generate') return hasModulePerm('generate');
+    if (step.path === '/check') return hasModulePerm('check');
+    if (step.path === '/format') return hasModulePerm('format');
+    return false;
+  });
+  const filteredQuickActions = quickActions.filter(action => {
+    if (action.path === '/interpret') return hasModulePerm('interpret');
+    if (action.path === '/check') return hasModulePerm('check');
+    if (action.path === '/format') return hasModulePerm('format');
+    if (action.path === '/news') return hasModulePerm('news');
+    return false;
+  });
   const navigate = useNavigate();
 
   useEffect(() => { loadProjects(); }, []);
@@ -267,7 +289,7 @@ export default function DashboardPage() {
             </button>
           </div>
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            {pipelineSteps.map((step, idx) => {
+            {filteredPipelineSteps.map((step, idx) => {
               const isCompleted = currentStep > idx;
               const isActive = currentStep === idx;
               return (
@@ -319,7 +341,7 @@ export default function DashboardPage() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0', position: 'relative' }}>
-          {pipelineSteps.map((step, idx) => {
+          {filteredPipelineSteps.map((step, idx) => {
             const isExpanded = expandedFlow === idx;
             const isLast = idx === pipelineSteps.length - 1;
             return (
@@ -443,7 +465,7 @@ export default function DashboardPage() {
             <h3 style={{ fontSize: '13px', fontWeight: 600, color: '#0f172a' }}>快捷入口</h3>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-            {quickActions.map(action => (
+            {filteredQuickActions.map(action => (
               <div
                 key={action.path}
                 onClick={() => navigate(action.path)}
@@ -564,7 +586,7 @@ export default function DashboardPage() {
                           )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '1px' }}>
-                          {pipelineSteps.map((s, i) => (
+                          {filteredPipelineSteps.map((s, i) => (
                             <div key={i} title={s.label} style={{
                               width: pStep > i ? '7px' : pStep === i ? '7px' : '4px',
                               height: '4px', borderRadius: '2px',

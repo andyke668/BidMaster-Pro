@@ -73,19 +73,27 @@ export default function Sidebar() {
 
   const userRoleNames = (user?.roles || []).map(r => r.name);
   const isSystemAdmin = userRoleNames.includes('admin');
-  const hasAnyRole = userRoleNames.length > 0;
+  const userPermissions = useAppStore((s) => s.permissions) || [];
+
+  // 检查用户是否有某个模块的权限（匹配前缀）
+  const hasModulePerm = (module: string) => {
+    if (isSystemAdmin) return true;
+    return userPermissions.some(p => p.startsWith(module + '.'));
+  };
 
   const visiblePipelineSteps = pipelineSteps.filter(step => {
-    if (isSystemAdmin) return true;
-    if (!hasAnyRole) return false;
-    return true;
+    if (step.path === '/interpret') return hasModulePerm('interpret');
+    if (step.path === '/generate') return hasModulePerm('generate');
+    if (step.path === '/check') return hasModulePerm('check');
+    if (step.path === '/format') return hasModulePerm('format');
+    return false;
   });
   const visibleOtherNav = otherNavItems.filter(item => {
-    if (isSystemAdmin) return true;
-    if (item.path === '/settings') return userRoleNames.some(n => n === 'admin' || n === 'project_manager' || n === 'writer');
-    if (item.path === '/news') return hasAnyRole;
-    return hasAnyRole;
+    if (item.path === '/settings') return hasModulePerm('settings');
+    if (item.path === '/news') return hasModulePerm('news');
+    return false;
   });
+  const hasAnyPermission = userPermissions.length > 0 || isSystemAdmin;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -194,7 +202,7 @@ export default function Sidebar() {
         </div>
       )}
 
-      {!hasAnyRole && !isSystemAdmin && (
+      {!hasAnyPermission && (
         <div style={{
           margin: sidebarCollapsed ? '12px 8px' : '8px 16px',
           padding: sidebarCollapsed ? '8px 0' : '10px 12px',

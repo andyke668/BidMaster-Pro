@@ -6,7 +6,7 @@ import logoImg from '../assets/logo.png';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { setUser, setToken } = useAppStore();
+  const { setUser, setToken, setPermissions } = useAppStore();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -24,6 +24,7 @@ export default function LoginPage() {
       localStorage.setItem('bidmaster_user', JSON.stringify(user));
       setToken(token);
       setUser(user);
+      setPermissions(user.permissions || []);
       navigate('/dashboard');
     } catch (err: unknown) {
       if (err && typeof err === 'object' && 'response' in err) {

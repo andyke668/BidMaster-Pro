@@ -7,12 +7,14 @@ interface AppState {
   projects: Project[];
   sidebarCollapsed: boolean;
   user: LoginUser | null;
+  permissions: string[];
   token: string | null;
   _hydrated: boolean;
   setCurrentProject: (id: string | null) => void;
   setProjects: (projects: Project[]) => void;
   toggleSidebar: () => void;
   setUser: (user: LoginUser | null) => void;
+  setPermissions: (permissions: string[]) => void;
   setToken: (token: string | null) => void;
   setHydrated: () => void;
   logout: () => void;
@@ -25,18 +27,20 @@ export const useAppStore = create<AppState>()(
       projects: [],
       sidebarCollapsed: false,
       user: null,
+      permissions: [],
       token: null,
       _hydrated: false,
       setCurrentProject: (id) => set({ currentProjectId: id }),
       setProjects: (projects) => set({ projects }),
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
       setUser: (user) => set({ user }),
+      setPermissions: (permissions) => set({ permissions }),
       setToken: (token) => set({ token }),
       setHydrated: () => set({ _hydrated: true }),
       logout: () => {
         localStorage.removeItem('bidmaster_token');
         localStorage.removeItem('bidmaster_user');
-        set({ user: null, token: null, currentProjectId: null, projects: [] });
+        set({ user: null, token: null, currentProjectId: null, projects: [], permissions: [] });
       },
     }),
     {
@@ -46,6 +50,7 @@ export const useAppStore = create<AppState>()(
         sidebarCollapsed: state.sidebarCollapsed,
         token: state.token,
         user: state.user,
+          permissions: state.permissions,
       }),
       onRehydrateStorage: () => {
         return (_state, error) => {

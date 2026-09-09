@@ -1,6 +1,6 @@
 {
   "name": "bidmaster-pro-desktop",
-  "version": "0.2.0",
+  "version": "0.3.1",
   "description": "智多星标书辅助系统（Resourceful Star）- 全流程智能招投标平台",
   "main": "main/index.js",
   "productName": "智多星标书辅助系统",
