@@ -13,7 +13,7 @@ from core.skill_engine.base import Skill, SkillContext, SkillResult
 
 logger = logging.getLogger(__name__)
 
-REVISION_AUTHOR = "BidMaster-Pro"
+REVISION_AUTHOR = "Resourceful-Star"
 REVISION_DATE = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

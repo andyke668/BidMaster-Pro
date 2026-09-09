@@ -9,6 +9,8 @@ function createWindow() {
     height: 900,
     minWidth: 1024,
     minHeight: 680,
+    title: '智多星标书辅助系统',
+    icon: path.join(__dirname, '../logo.png'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,

@@ -1,5 +1,5 @@
 # ============================================================================
-# BidMaster Pro - 完整 Docker 编排
+# 智多星标书辅助系统（Resourceful Star）- 完整 Docker 编排
 #
 # 部署模式：
 #   A) 全量部署（默认）：docker compose --profile infra up -d

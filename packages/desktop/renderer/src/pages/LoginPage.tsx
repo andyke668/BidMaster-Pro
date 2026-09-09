@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authApi } from '../services/api';
 import { useAppStore } from '../stores/appStore';
+import logoImg from '../assets/logo.png';
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -79,20 +80,20 @@ export default function LoginPage() {
         backdropFilter: 'blur(20px)',
       }}>
         <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-          <div style={{
-            width: '56px', height: '56px', borderRadius: '14px',
-            background: 'linear-gradient(135deg, #3b82f6, #1d4ed8)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            margin: '0 auto 16px', fontSize: '24px', color: 'white', fontWeight: 700,
-            boxShadow: '0 4px 16px rgba(59,130,246,0.4)',
-          }}>
-            B
-          </div>
+          <img
+            src={logoImg}
+            alt="智多星标书辅助系统"
+            style={{
+              width: '64px', height: '64px', objectFit: 'contain',
+              margin: '0 auto 16px', display: 'block',
+              filter: 'drop-shadow(0 4px 16px rgba(59,130,246,0.35))',
+            }}
+          />
           <h1 style={{ fontSize: '24px', fontWeight: 700, color: '#0f172a', margin: 0 }}>
-            BidMaster Pro
+            智多星标书辅助系统
           </h1>
           <p style={{ fontSize: '14px', color: '#64748b', marginTop: '8px' }}>
-            全流程智能招投标平台
+            Resourceful Star · 全流程智能招投标平台
           </p>
         </div>
 

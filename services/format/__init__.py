@@ -1,1 +1,1 @@
-# BidMaster Pro
+# 智多星标书辅助系统

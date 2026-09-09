@@ -143,7 +143,7 @@ export default function Sidebar() {
       >
         <img
           src={logoImg}
-          alt="BidMaster Pro"
+          alt="智多星标书辅助系统"
           style={{
             width: '32px',
             height: '32px',
@@ -155,10 +155,10 @@ export default function Sidebar() {
         {!sidebarCollapsed && (
           <div style={{ minWidth: 0, flex: 1 }}>
             <h1 style={{ fontSize: '15px', fontWeight: 700, color: '#0f172a', margin: 0, whiteSpace: 'nowrap' }}>
-              BidMaster Pro
+              智多星标书辅助系统
             </h1>
             <p style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px', whiteSpace: 'nowrap' }}>
-              全流程智能招投标平台
+              Resourceful Star · 全流程智能招投标平台
             </p>
           </div>
         )}
@@ -383,7 +383,7 @@ export default function Sidebar() {
           color: '#cbd5e1',
           textAlign: 'center',
         }}>
-          BidMaster Pro v2.0
+          Resourceful Star v2.0
         </div>
       )}
 

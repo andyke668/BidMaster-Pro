@@ -114,7 +114,7 @@ class InterpretExportSkill(Skill):
                     lines.append("")
 
         lines.append("---")
-        lines.append("*报告由 BidMaster Pro 自动生成*")
+        lines.append("*报告由 智多星标书辅助系统 自动生成*")
 
         return "\n".join(lines)
 

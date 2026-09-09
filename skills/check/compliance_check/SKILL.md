@@ -5,7 +5,7 @@ category: check
 version: "1.0.0"
 license: MIT
 metadata:
-  author: BidMaster Pro
+  author: Resourceful Star
   triggers:
     - 合规
     - 合规性

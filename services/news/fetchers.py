@@ -112,7 +112,7 @@ class RSSFetcher(BaseFetcher):
                 requests.get,
                 url,
                 timeout=15,
-                headers={"User-Agent": "BidMaster-Pro/1.0 (Tender Monitor)"},
+                headers={"User-Agent": "Resourceful-Star/1.0 (Tender Monitor)"},
             )
             resp.raise_for_status()
         except requests.exceptions.Timeout:
@@ -245,13 +245,13 @@ class APIFetcher(BaseFetcher):
         exclude_repos = (
             config.get("exclude_repos")
             or cfg.get("exclude_repos")
-            or ["bidmaster-pro", "BidMaster-Pro", "bidmaster_pro"]  # 默认排除本项目
+            or ["resourceful-star", "Resourceful-Star", "resourceful_star", "bidmaster-pro", "BidMaster-Pro", "bidmaster_pro"]  # 默认排除本项目
         )
         # 排除关键字 (title/url 中包含则过滤)
         exclude_keywords = (
             config.get("exclude_keywords")
             or cfg.get("exclude_keywords")
-            or ["bidmaster"]
+            or ["bidmaster", "resourceful-star"]
         )
 
         for repo in data.get("items", []):
