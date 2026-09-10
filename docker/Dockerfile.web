@@ -34,8 +34,8 @@ FROM nginx:1.27-alpine AS runtime
 # 拷贝自定义 nginx 配置（反向代理 /api → api 服务，SSE 流式支持）
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 
-# 拷贝构建产物到 nginx html 目录
-COPY --from=builder /build/dist /usr/share/nginx/html
+# 拷贝构建产物到 nginx 的 /zdx 子路径目录
+COPY --from=builder /build/dist /usr/share/nginx/html/zdx
 
 EXPOSE 80
 
