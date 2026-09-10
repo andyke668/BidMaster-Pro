@@ -574,7 +574,7 @@ async def check_permission(
 
 
 @router.post("/init")
-async def init_rbac(db: AsyncSession = Depends(get_db)):
+async def initialize_rbac(db: AsyncSession) -> None:
     perm_map: dict[str, str] = {}
 
     for category, perms in DEFAULT_PERMISSIONS.items():
@@ -642,9 +642,30 @@ async def init_rbac(db: AsyncSession = Depends(get_db)):
 
     await db.flush()
 
+    admin = (
+        await db.execute(select(User).where(User.email == "admin@bidmaster.pro"))
+    ).scalar_one_or_none()
+    admin_role = (
+        await db.execute(select(RBACRole).where(RBACRole.name == "admin"))
+    ).scalar_one_or_none()
+    if admin and admin_role:
+        existing_user_role = await db.execute(
+            select(RBACUserRole).where(
+                RBACUserRole.user_id == admin.id,
+                RBACUserRole.role_id == admin_role.id,
+            )
+        )
+        if not existing_user_role.scalar_one_or_none():
+            db.add(RBACUserRole(user_id=admin.id, role_id=admin_role.id))
+
+
+@router.post("/init")
+async def init_rbac(db: AsyncSession = Depends(get_db)):
+    await initialize_rbac(db)
+    await db.commit()
     return {
         "success": True,
         "message": "RBAC默认角色和权限初始化完成",
-        "permissions_count": len(perm_map),
+        "permissions_count": len(DEFAULT_PERMISSIONS),
         "roles_count": len(DEFAULT_ROLES),
     }

@@ -39,6 +39,14 @@ async def lifespan(app: FastAPI):
     register_builtin_skills()
     await init_db()
 
+    try:
+        from services.routers.rbac import initialize_rbac
+        async with async_session()() as rbac_db:
+            await initialize_rbac(rbac_db)
+            await rbac_db.commit()
+    except Exception as exc:
+        logging.getLogger("rbac").warning(f"RBAC初始化失败 (可忽略): {exc}")
+
     # 同步预置数据源 (YAML -> DB),仅做幂等写入,不抛错
     try:
         from services.news.source_registry import sync_sources_to_db
