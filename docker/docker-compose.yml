@@ -233,6 +233,8 @@ services:
     image: bidmaster-pro-api:latest
     restart: unless-stopped
     command: celery -A services.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-2}
+    healthcheck:
+      disable: true
     environment: *api-env
     depends_on:
       redis:
@@ -253,6 +255,8 @@ services:
     image: bidmaster-pro-api:latest
     restart: unless-stopped
     command: celery -A services.celery_app beat --loglevel=info
+    healthcheck:
+      disable: true
     environment: *api-env
     depends_on:
       redis:
