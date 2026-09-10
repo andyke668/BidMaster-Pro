@@ -573,7 +573,6 @@ async def check_permission(
     }
 
 
-@router.post("/init")
 async def initialize_rbac(db: AsyncSession) -> None:
     perm_map: dict[str, str] = {}
 
