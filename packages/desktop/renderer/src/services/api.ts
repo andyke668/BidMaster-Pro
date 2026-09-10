@@ -1,7 +1,9 @@
 import axios from 'axios';
 
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, '');
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: `${API_BASE}/api`,
   timeout: 120000,
   headers: {
     'Content-Type': 'application/json',
@@ -32,8 +34,8 @@ api.interceptors.response.use(
           }
         } catch { /* ignore */ }
       }
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+      if (window.location.pathname !== `${API_BASE}/login`) {
+        window.location.href = `${API_BASE}/login`;
       }
     }
     return Promise.reject(error);
@@ -240,11 +242,11 @@ export const generateApi = {
   generateChapter: (projectId: string, chapterId: string, mode: string = 'A') =>
     api.post(`/generate/${projectId}/content/${chapterId}?mode=${mode}`, {}, { timeout: 300000 }),
   streamChapter: (projectId: string, chapterId: string, mode: string = 'A', handlers?: SSEHandlers): SSEController | string => {
-    const url = `/api/generate/${projectId}/content/stream/${chapterId}?mode=${mode}`;
+    const url = `${API_BASE}/api/generate/${projectId}/content/stream/${chapterId}?mode=${mode}`;
     return handlers ? streamSSE(url, handlers) : url;
   },
   streamAllChapters: (projectId: string, mode: string = 'A', handlers?: SSEHandlers): SSEController | string => {
-    const url = `/api/generate/${projectId}/content/stream-all?mode=${mode}`;
+    const url = `${API_BASE}/api/generate/${projectId}/content/stream-all?mode=${mode}`;
     return handlers ? streamSSE(url, handlers) : url;
   },
   listChapters: (projectId: string) =>
@@ -472,7 +474,7 @@ export const formatApi = {
   getTemplate: (name: string) => api.get(`/format/templates/${name}`),
   saveTemplate: (name: string, config: Record<string, unknown>) => api.put(`/format/templates/${name}`, config),
   deleteTemplate: (name: string) => api.delete(`/format/templates/${name}`),
-  downloadOutput: (path: string) => `/api/format/download?path=${encodeURIComponent(path)}`,
+  downloadOutput: (path: string) => `${API_BASE}/api/format/download?path=${encodeURIComponent(path)}`,
 };
 
 export interface MinerUConfig {

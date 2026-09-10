@@ -42,7 +42,7 @@ export default function LoginPage() {
     <div style={{ minHeight: '100vh', position: 'relative', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
       {/* SVG Background */}
       <img
-        src="/login-bg.svg"
+        src={`${import.meta.env.BASE_URL}login-bg.svg`}
         alt=""
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', zIndex: 0 }}
       />
