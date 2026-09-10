@@ -14,6 +14,10 @@ import {
 import logoImg from '../../assets/logo.png';
 import { useAppStore } from '../../stores/appStore';
 
+declare const __APP_VERSION__: string;
+
+const appVersion = __APP_VERSION__;
+
 const pipelineSteps = [
   { path: '/interpret', icon: FileSearch, label: '招标解读', step: 1, desc: '上传招标文件，AI智能解读', color: '#3b82f6' },
   { path: '/generate', icon: PenTool, label: '投标生成', step: 2, desc: '大纲编辑，AI生成正文', color: '#059669' },
@@ -391,7 +395,7 @@ export default function Sidebar() {
           color: '#cbd5e1',
           textAlign: 'center',
         }}>
-          智多星标书辅助系统 v2.0
+          智多星标书辅助系统 v{appVersion}
         </div>
       )}
 
@@ -402,7 +406,7 @@ export default function Sidebar() {
           display: 'flex',
           justifyContent: 'center',
         }}>
-          <span style={{ fontSize: '9px', color: '#cbd5e1' }}>v2.0</span>
+          <span style={{ fontSize: '9px', color: '#cbd5e1' }}>v{appVersion}</span>
         </div>
       )}
     </aside>

@@ -2,9 +2,14 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
+const packageVersion = process.env.npm_package_version || '0.0.0';
+
 export default defineConfig(({ mode }) => ({
   base: mode === 'production' ? '/zdx/' : '/',
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(packageVersion),
+  },
   root: 'renderer',
   resolve: {
     alias: {
