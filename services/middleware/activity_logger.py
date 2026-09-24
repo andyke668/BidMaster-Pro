@@ -178,6 +178,12 @@ async def _insert_activity(payload: dict[str, Any]) -> str | None:
 
     if not is_db_ready():
         return None
+    # 路由中间件只看得到 URL，拿得到 project_id 却拿不到项目名（它不读响应体）。
+    # 这里在落库前补齐，且必须在「写入时」解析而不是在管理后台读取时 join：
+    # 项目日后改名或被删，审计流水仍要留着当时的名字——与 user_activity_log
+    # 刻意冗余 user_email / user_name 是同一个理由。
+    if payload.get("project_id") and not payload.get("project_name"):
+        payload["project_name"] = await _project_name(payload["project_id"])
     try:
         factory = async_session()
         async with factory() as db:
@@ -508,4 +514,3 @@ async def reap_stale_running(db, *, stale_minutes: int = 180) -> int:
     )
     await db.commit()
     return int(result.rowcount or 0)
-
