@@ -402,13 +402,48 @@ class LLMGateway:
             raise
 
     def _record_usage(self, model: str, usage: Any):
-        if usage:
-            self._token_usage.append({
-                "model": model,
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                "completion_tokens": getattr(usage, "completion_tokens", 0),
-                "total_tokens": getattr(usage, "total_tokens", 0),
-            })
+        if not usage:
+            return
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (
+            prompt_tokens + completion_tokens
+        )
+        # 身份与业务动作从 ContextVar 取（见 middleware/request_context.py）：
+        # skill 层完全不需要感知「当前是谁在调用」，asyncio.create_task 会把
+        # 上下文拷进 TaskManager 的后台协程，所以异步任务里的调用同样归得到人。
+        user_id: str | None = None
+        action: str | None = None
+        activity_logger = None
+        try:
+            from services.middleware import activity_logger, request_context
+
+            user_id = request_context.get_user_id()
+            action = request_context.get_action()
+        except Exception:  # 网关可脱离 services 单独使用，导入失败就只留内存统计
+            pass
+
+        self._token_usage.append({
+            "model": model,
+            "user_id": user_id,
+            "action": action,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        })
+
+        if activity_logger is not None:
+            try:
+                activity_logger.record_llm_usage(
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    user_id=user_id,
+                    action=action,
+                )
+            except Exception as exc:  # token 统计失败绝不能影响 LLM 调用本身
+                logger.debug(f"[LLM] 记录 token 流水失败: {exc}")
 
     def get_token_summary(self) -> dict:
         total_prompt = sum(u["prompt_tokens"] for u in self._token_usage)

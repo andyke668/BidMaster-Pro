@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 
@@ -105,9 +105,17 @@
 - **智能问答**: 基于知识库的 Q&A 助手
 
 #### 权限管理 (RBAC)
-- **角色定义**: 管理员、项目经理、编写员、审核员
+- **角色定义**: 管理员、项目经理、编写员、审核员、标书检查员
 - **细粒度权限**: 菜单级和操作级权限控制
 - **团队协作**: 多用户协同编辑和审核
+
+#### 使用监控（管理员后台）
+- **实时在线**: 谁在线、谁正在跑任务、跑到第几步，5 秒刷新
+- **全员用量**: 按人统计操作数、失败率、活跃天数、检查次数、Token 消耗
+- **行为流水**: 每条操作可追溯到项目名与标书文件名，支持过滤与 CSV 导出
+- **风险告警**: 高失败率、配额将满、疑似撞库、疑似共享账号、任务堆积与卡死六条规则实时计算
+- **配额治理**: 按人设置每日操作数与 Token 上限，超限返回 429；支持强制下线与禁用账号
+- **权限**: 由 `settings.monitor` 单独控制，默认只有管理员可见
 
 ---
 
@@ -358,7 +366,12 @@ if not gate_keeper.is_passed(project_id, "interpret"):
 
 ## 📝 更新日志
 
-当前版本 **v0.3.1**（2026-09-09）。本轮固化投标审查 12 页彩色 Excel 模板，补齐报告空页数据源，提高大文件上传上限，完成品牌升级为「智多星标书辅助系统」，并增强 RBAC 权限控制与业务接口保护。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
+当前版本 **v0.4.0**（2026-09-24）。本轮新增管理后台「使用监控」：全员用量、实时在线状态、行为流水、Token 消耗、风险告警与按人配额治理；同时把登录态从进程内字典迁到 `user_sessions` 表，服务重启不再全员掉线。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
+
+> **v0.4.0 升级须知**：本次给 `users` 表加了 `is_active` / `last_login_at` 两列，而启动时的
+> `Base.metadata.create_all` 只建缺失的表、**不会给已有表补列**。升级必须先执行
+> `bash deploy_bidmaster.sh migrate`（或手工跑 `db/migrations/001_admin_monitor.sql`）再重启 api，
+> 否则 ORM 一查 `users` 就会报 column does not exist。迁移脚本幂等，可重复执行。
 
 > 本仓库 fork 自 [guangshu100/BidMaster-Pro](https://github.com/guangshu100/BidMaster-Pro)。`v0.2.0` 起的全部改动均为本 fork 自研，且已在内网 Docker Compose 环境（postgres + api + web）实际部署并逐项验证；其中**包含破坏性接口变更**（`upload-check` 与 AI 解读改为「提交任务 + 轮询」、生产 `UVICORN_WORKERS` 必须为 1），升级前请先读 CHANGELOG 的「破坏性变更」一节。
 

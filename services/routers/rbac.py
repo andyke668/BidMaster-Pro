@@ -16,11 +16,14 @@ from services.models import (
     Project,
     Notification,
     MonitoringTask,
+    UserQuota,
+    UserSession,
     RBACRole,
     RBACPermission,
     RBACUserRole,
     RBACRolePermission,
 )
+from core.timeutil import to_local_iso
 from services.middleware.rbac_middleware import get_current_user, require_permission
 
 router = APIRouter(
@@ -47,12 +50,14 @@ class UserCreate(BaseModel):
     name: str
     password: str = ""
     role_name: str | None = None
+    is_active: bool = True
 
 
 class UserUpdate(BaseModel):
     name: str | None = None
     email: str | None = None
     password: str | None = None
+    is_active: bool | None = None
 
 
 class PermissionAssign(BaseModel):
@@ -111,6 +116,7 @@ DEFAULT_PERMISSIONS = {
         ("settings.llm", "配置LLM"),
         ("settings.agent", "配置Agent"),
         ("settings.rbac", "管理权限"),
+        ("settings.monitor", "查看使用监控"),
     ],
 }
 
@@ -123,7 +129,11 @@ DEFAULT_ROLES = {
     "project_manager": {
         "display_name": "项目经理",
         "is_system": False,
-        "excluded": ["settings.rbac", "settings.agent"],
+        # 注意：excluded 是「排除法」，initialize_rbac 每次启动都会把不在名单里的
+        # 权限补授给该角色。所以任何新增的敏感权限码都必须显式写进这里，
+        # 否则项目经理会在下次重启后悄悄获得它。settings.monitor 能看全公司
+        # 每个人的使用明细与标书文件名，属管理员专属，故排除。
+        "excluded": ["settings.rbac", "settings.agent", "settings.monitor"],
     },
     "writer": {
         "display_name": "撰写员",
@@ -377,6 +387,9 @@ async def list_users(db: AsyncSession = Depends(get_db)):
                 "email": u.email,
                 "name": u.name,
                 "avatar": u.avatar,
+                "role": u.role,
+                "is_active": u.is_active is not False,
+                "last_login_at": to_local_iso(u.last_login_at),
                 "roles": user_roles.get(str(u.id), []),
                 "created_at": u.created_at.isoformat() if u.created_at else None,
             }
@@ -401,6 +414,7 @@ async def create_user(data: UserCreate, db: AsyncSession = Depends(get_db)):
         email=data.email,
         name=data.name,
         password_hash=pw_hash,
+        is_active=data.is_active,
     )
     db.add(user)
     await db.flush()
@@ -418,6 +432,7 @@ async def create_user(data: UserCreate, db: AsyncSession = Depends(get_db)):
         "id": str(user.id),
         "email": user.email,
         "name": user.name,
+        "is_active": user.is_active is not False,
     }
 
 
@@ -443,12 +458,20 @@ async def update_user(
         user.email = data.email
     if data.password is not None:
         user.password_hash = _hash_password(data.password)
+    if data.is_active is not None:
+        user.is_active = bool(data.is_active)
+        if not data.is_active:
+            # 禁用即失效：吊销其全部会话，避免已登录的会话继续可用
+            from services.middleware import session_store
+
+            await session_store.revoke_all_for_user(db, user.id)
 
     await db.flush()
     return {
         "id": str(user.id),
         "email": user.email,
         "name": user.name,
+        "is_active": user.is_active is not False,
     }
 
 
@@ -475,6 +498,10 @@ async def delete_user(user_id: str, db: AsyncSession = Depends(get_db)):
             RBACUserRole.user_id == user.id
         )
     )
+    # 会话与配额都带 users.id 外键，必须先清；行为流水刻意不建外键，
+    # 删人之后审计记录仍然可查。
+    await db.execute(sa_delete(UserSession).where(UserSession.user_id == user.id))
+    await db.execute(sa_delete(UserQuota).where(UserQuota.user_id == user.id))
     await db.delete(user)
     await db.flush()
     return {"success": True}

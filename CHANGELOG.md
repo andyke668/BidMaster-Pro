@@ -13,6 +13,73 @@
 
 ---
 
+## [0.4.0] - 2026-09-24
+
+**管理后台使用监控 · 全员用量 / 实时在线 / 行为流水 / Token / 配额治理**
+
+一句话总结：管理员现在可以在后台看到所有人（含标书检查员）此刻是否在线、正在跑什么任务、
+做了哪些操作、烧了多少 Token，并能按人设配额、强制下线、禁用账号；
+登录态同时从进程内字典迁到数据库，服务重启不再全员掉线。
+
+### ✨ 新增（Added）
+
+- **使用监控后台页面**（侧边栏「使用监控」，路由 `/admin`，权限码 `settings.monitor`）
+  - 七个页签：总览看板、实时在线、用户用量、行为流水、Token 消耗、风险告警、配额治理。
+  - 总览：在线/使用中/在途任务/今日活跃用户等 8 个 KPI，按天趋势图（操作数、活跃用户、Token 三口径切换，纯 SVG 手绘，未引入图表库），操作类型分布与用量 TOP10。
+  - 实时在线：5 秒轮询 `/api/admin/presence`，逐人显示在线/使用中/离线、当前在跑的任务与进度条；另附全平台在途任务表。
+  - 用户用量：搜索 + 角色/在线状态筛选 + 10 列可排序 + 分页；点开抽屉看单人详情（活跃会话、操作分布、最近流水、配额编辑、强制下线、启用/禁用）。
+  - 行为流水：按用户/操作类型/状态过滤，行展开可见**项目名、标书文件名**、错误信息与原始 detail。
+  - Token 消耗：按用户/模型/操作类型三种口径聚合。**只展示消耗量，不折算金额**（按需求确认）。
+  - 风险告警：六条只读规则实时计算——高失败率、配额将满、单 IP 登录失败集中（疑似撞库）、单账号会话过多（疑似共享）、在途任务堆积、任务疑似卡死。
+  - 用户用量与行为流水均支持导出 CSV（带 BOM，Excel 打开中文不乱码）。
+
+- **监控后端** `services/routers/admin_monitor.py`：`/api/admin` 下 14 个端点，全部由 `settings.monitor` 权限守卫。
+
+- **四张新表**（`db/migrations/001_admin_monitor.sql`，幂等）
+  - `user_sessions`：登录会话（token 只存 sha256，明文仅在登录响应出现一次）。
+  - `user_activity_log`：行为流水。**刻意不建 user_id 外键**并冗余 email/name，用户被删后审计仍可查。
+  - `llm_usage_log`：Token 消耗流水（按人 / 按动作 / 按模型）。
+  - `user_quotas`：每人每日操作数与 Token 配额，0 = 不限。
+  - `users` 表补 `is_active`、`last_login_at` 两列。
+
+- **行为采集链路**
+  - `ActivityMonitorMiddleware`（纯 ASGI，只包 `send()` 读状态码）：对流式端点零干扰，未命中白名单直接透传。
+  - `TaskManager` activity hook：异步任务在提交时落一条 `running`，结束时改成真实成败与耗时。
+  - LLM 网关按 ContextVar 把每次调用的 token 归到具体用户。
+
+- **每人每日配额** `services/middleware/quota.py`：挂在解读/生成/检查/排版四个 router 上，只统计写操作（GET 轮询一律放过），计数含在途任务防连点绕过；超限返回 429。admin 角色不限流。
+
+- **新角色** `bid_checker`（标书检查员）与权限码 `settings.monitor`。**未**授予 `project_manager`（该角色在 rbac.py 里用排除法，已显式排除，否则项目经理下次重启就会自动获得全公司监控权）。
+
+- **部署脚本** `deploy_bidmaster.sh migrate` 子命令，按文件名顺序执行 `db/migrations/*.sql`，并已插入 `all` 全流程（排在 `build_up` 之后、`wait_healthy` 之前）。
+
+### 🔧 调整（Changed）
+
+- **登录态迁到数据库**：原先存在 `auth.py` 的进程内字典里，服务重启即全员掉线，且被 `UVICORN_WORKERS=1` 绑死。现在走 `user_sessions` 表，重启不掉线，也不再依赖单 worker。
+- `get_current_user` 顺带刷新会话心跳（带节流），这是「当前在线」的唯一数据来源，前端不需要额外打点。
+- `auth.py` 新增 `GET /api/auth/me` 与 `GET /api/auth/sessions`（查看自己的活跃登录会话）。
+- 登录失败（密码错误 / 账号被禁用）也会记入行为流水，撞库告警据此计算。
+- 日志保留：`activity_retention_days`（默认 90 天）到期自动清理行为流水与 token 流水；进程重启遗留的 `running` 流水会被兜底标记为失败。
+
+### 🐞 修复（Fixed）
+
+- `services/routers/auth.py` 在类型注解里用了 `Request` 但从未 import，属于一启动就会 NameError 的潜在故障，本次重写一并修掉。
+- 时间口径统一：库里是 naive UTC，使用者在 Asia/Shanghai。所有「今日 / 按天趋势 / 活跃天数」都经 `core/timeutil.py` 换算，避免北京时间 08:00 之前的行为被算进昨天。
+
+### 🔒 隐私与权限边界
+
+- 管理员为最高权限，可见具体项目名与标书文件名（已与需求方确认）。
+- `settings.monitor` 是精确权限码，前端路由与侧边栏入口都按这一条判断，不沿用「有任意 `settings.*` 即放行」的宽松前缀匹配。
+- 强制下线 / 禁用 / 改配额都会记一条 `admin.*` 行为流水，操作可追溯；不能禁用自己，也不会让最后一个可用管理员被锁在门外。
+
+### 🧪 验证（Verification）
+
+- `测试/verify_admin_monitor.py`：190 项断言全部通过——模块导入与 FastAPI 路由注册（强制求值全部端点注解）、SQLAlchemy 模型建表 DDL、时间口径换算、路由白名单解析、ASGI 中间件行为（流式透传 / 4xx-5xx-异常分档 / 无身份不记 / websocket 透传）、TaskManager 在途任务与钩子、配额计数、会话表数据流（SQLite 内存库）、RBAC 默认权限。
+- 前端 `tsc --noEmit` 零错误，`vite build` 生产构建通过（2735 模块）。
+- 后端全量 `compileall` 通过。
+
+---
+
 ## [0.3.1] - 2026-09-09
 
 **9 个功能提交 · 覆盖投标审查模板、报告数据、上传限制、品牌与 RBAC 安全**

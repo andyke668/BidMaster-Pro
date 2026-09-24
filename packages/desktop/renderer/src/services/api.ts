@@ -155,6 +155,16 @@ export interface LoginUser {
   permissions: string[];
 }
 
+export interface MySession {
+  id: string;
+  client_ip: string | null;
+  user_agent: string | null;
+  created_at: string | null;
+  last_seen_at: string | null;
+  expires_at: string | null;
+  is_current: boolean;
+}
+
 export const authApi = {
   login: (email: string, password: string) =>
     api.post<{ token: string; user: LoginUser }>('/auth/login', { email, password }),
@@ -162,6 +172,7 @@ export const authApi = {
   logout: () => api.post('/auth/logout', {}),
   changePassword: (newPassword: string) =>
     api.put('/auth/change-password', { new_password: newPassword }),
+  sessions: () => api.get<{ sessions: MySession[] }>('/auth/sessions'),
 };
 
 export const projectApi = {
@@ -746,6 +757,368 @@ export const aiImageApi = {
     api.post('/ai-image/generate', { prompt, provider, image_size: imageSize }, { timeout: 120000 }),
   listProviders: () => api.get('/ai-image/providers'),
   saveConfig: (provider: string, apiKey: string) => api.put('/ai-image/config', { provider, api_key: apiKey }),
+};
+
+// ─────────────────────────── 使用监控（管理后台） ───────────────────────────
+
+export type AdminRange = 'today' | '24h' | '7d' | '30d' | '90d' | 'all';
+export type AdminPresenceStatus = 'online' | 'busy' | 'offline';
+
+export const ADMIN_RANGES: Array<{ value: AdminRange; label: string }> = [
+  { value: 'today', label: '今日' },
+  { value: '24h', label: '近24小时' },
+  { value: '7d', label: '近7天' },
+  { value: '30d', label: '近30天' },
+  { value: '90d', label: '近90天' },
+  { value: 'all', label: '全部' },
+];
+
+export interface AdminTokenTotals {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface AdminOverviewToday {
+  active_users: number;
+  actions: number;
+  failed_actions: number;
+  failure_rate: number;
+  logins: number;
+  login_failures: number;
+  tokens: AdminTokenTotals;
+}
+
+export interface AdminOverviewRange {
+  active_users: number;
+  actions: number;
+  success_actions: number;
+  failed_actions: number;
+  rejected_actions: number;
+  failure_rate: number;
+  tokens: AdminTokenTotals;
+}
+
+export interface AdminTrendPoint {
+  date: string;
+  actions: number;
+  active_users: number;
+  tokens: number;
+}
+
+export interface AdminActionBreakdown {
+  action: string;
+  label: string;
+  count: number;
+  failed: number;
+  avg_duration_ms: number;
+}
+
+export interface AdminTopUser {
+  user_id: string;
+  name: string;
+  email: string | null;
+  roles: string[];
+  count: number;
+}
+
+export interface AdminOverview {
+  range: AdminRange;
+  timezone: string;
+  generated_at: string;
+  users: { total: number; active: number; disabled: number };
+  presence: {
+    online: number;
+    busy: number;
+    running_tasks: number;
+    online_window_seconds: number;
+    heartbeat_interval_seconds: number;
+  };
+  today: AdminOverviewToday;
+  range_stats: AdminOverviewRange;
+  trend: AdminTrendPoint[];
+  action_breakdown: AdminActionBreakdown[];
+  top_users: AdminTopUser[];
+}
+
+export interface AdminRunningTask {
+  task_id: string;
+  task_type: string;
+  owner_id: string | null;
+  status: string;
+  progress: number;
+  progress_message: string | null;
+  error: string | null;
+  elapsed_seconds: number;
+  created_ts: number;
+  label: string;
+  bucket: string | null;
+  submitted_at: string;
+  owner_name?: string;
+  owner_email?: string | null;
+}
+
+export interface AdminPresenceUser {
+  user_id: string;
+  name: string;
+  email: string | null;
+  roles: string[];
+  is_active: boolean;
+  status: AdminPresenceStatus;
+  last_seen_at: string | null;
+  last_login_at: string | null;
+  tasks: AdminRunningTask[];
+}
+
+export interface AdminPresence {
+  generated_at: string;
+  online_window_seconds: number;
+  online: number;
+  busy: number;
+  running_tasks: number;
+  users: AdminPresenceUser[];
+}
+
+export interface AdminTaskList {
+  generated_at: string;
+  count: number;
+  tasks: AdminRunningTask[];
+}
+
+export interface AdminUserQuotaInfo {
+  daily_action_limit: number;
+  daily_token_limit: number;
+  today_actions: number;
+  today_tokens: number;
+  note: string | null;
+  customized: boolean;
+}
+
+export interface AdminUserUsage {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  roles: string[];
+  role_names: string[];
+  is_active: boolean;
+  created_at: string | null;
+  last_login_at: string | null;
+  status: AdminPresenceStatus;
+  last_seen_at: string | null;
+  current_tasks: AdminRunningTask[];
+  actions: number;
+  failed: number;
+  checks: number;
+  active_days: number;
+  last_action_at: string | null;
+  today_actions: number;
+  logins: number;
+  projects: number;
+  llm_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  tokens: number;
+  quota: AdminUserQuotaInfo;
+}
+
+export interface AdminUserList {
+  range: AdminRange;
+  timezone: string;
+  total: number;
+  page: number;
+  page_size: number;
+  users: AdminUserUsage[];
+}
+
+export interface AdminActivity {
+  id: string;
+  user_id: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  action: string;
+  action_label: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  resource_name: string | null;
+  project_id: string | null;
+  project_name: string | null;
+  detail: Record<string, unknown>;
+  status: string;
+  status_label: string;
+  error_message: string | null;
+  duration_ms: number | null;
+  client_ip: string | null;
+  user_agent: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AdminActivityList {
+  range: AdminRange;
+  timezone?: string;
+  total: number;
+  limit: number;
+  offset: number;
+  actions?: Array<[string, string]>;
+  activities: AdminActivity[];
+}
+
+export interface AdminSessionInfo {
+  id: string;
+  client_ip: string | null;
+  user_agent: string | null;
+  created_at: string | null;
+  last_seen_at: string | null;
+  expires_at: string | null;
+  is_online: boolean;
+}
+
+export interface AdminActivityTotals {
+  total: number;
+  success: number;
+  failed: number;
+  rejected: number;
+  running: number;
+  active_users: number;
+  failure_rate: number;
+  tokens: AdminTokenTotals;
+}
+
+export interface AdminUserSummary {
+  range: AdminRange;
+  timezone: string;
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
+    is_active: boolean;
+    created_at: string | null;
+    last_login_at: string | null;
+    status: AdminPresenceStatus;
+    last_seen_at: string | null;
+  };
+  range_stats: AdminActivityTotals;
+  today: AdminActivityTotals;
+  action_breakdown: AdminActionBreakdown[];
+  current_tasks: AdminRunningTask[];
+  sessions: AdminSessionInfo[];
+  quota: AdminUserQuotaInfo;
+  recent_activities: AdminActivity[];
+}
+
+export interface AdminTokenItem {
+  key: string;
+  label: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface AdminTokens {
+  range: AdminRange;
+  group_by: 'user' | 'model' | 'action';
+  totals: AdminTokenTotals;
+  items: AdminTokenItem[];
+}
+
+export interface AdminAlert {
+  level: 'danger' | 'warning' | 'info';
+  code: string;
+  message: string;
+  detected_at: string;
+  user_id?: string | null;
+  user_name?: string | null;
+  task_id?: string | null;
+  value?: Record<string, unknown>;
+}
+
+export interface AdminAlerts {
+  range: AdminRange;
+  timezone: string;
+  count: number;
+  alerts: AdminAlert[];
+}
+
+export interface AdminQuotaRow {
+  user_id: string;
+  name: string;
+  email: string;
+  roles: string[];
+  daily_action_limit: number;
+  daily_token_limit: number;
+  today_actions: number;
+  today_tokens: number;
+  note: string | null;
+  customized: boolean;
+  is_active: boolean;
+}
+
+export interface AdminQuotas {
+  defaults: { daily_action_limit: number; daily_token_limit: number };
+  timezone: string;
+  quotas: AdminQuotaRow[];
+}
+
+export interface AdminUserQuery {
+  range?: AdminRange;
+  q?: string;
+  role?: string;
+  presence?: '' | 'online' | 'offline' | 'busy' | 'disabled';
+  sort?: string;
+  order?: 'asc' | 'desc';
+  page?: number;
+  page_size?: number;
+}
+
+export interface AdminActivityQuery {
+  range?: AdminRange;
+  user_id?: string;
+  action?: string;
+  status?: string;
+  project_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export const adminApi = {
+  overview: (range: AdminRange = '7d') =>
+    api.get<AdminOverview>(`/admin/overview?range=${range}`),
+  presence: (includeOffline = false) =>
+    api.get<AdminPresence>(`/admin/presence?include_offline=${includeOffline}`),
+  tasks: () => api.get<AdminTaskList>('/admin/tasks'),
+  users: (params: AdminUserQuery = {}) =>
+    api.get<AdminUserList>('/admin/users', { params }),
+  userSummary: (userId: string, range: AdminRange = '7d') =>
+    api.get<AdminUserSummary>(`/admin/users/${userId}/summary?range=${range}`),
+  activities: (params: AdminActivityQuery = {}) =>
+    api.get<AdminActivityList>('/admin/activities', { params }),
+  userActivities: (userId: string, params: AdminActivityQuery = {}) =>
+    api.get<AdminActivityList>(`/admin/users/${userId}/activities`, { params }),
+  tokens: (range: AdminRange = '7d', groupBy: 'user' | 'model' | 'action' = 'user', limit = 50) =>
+    api.get<AdminTokens>(`/admin/tokens?range=${range}&group_by=${groupBy}&limit=${limit}`),
+  alerts: (range: AdminRange = '24h') =>
+    api.get<AdminAlerts>(`/admin/alerts?range=${range}`),
+  quotas: () => api.get<AdminQuotas>('/admin/quotas'),
+  updateQuota: (userId: string, data: { daily_action_limit: number; daily_token_limit: number; note?: string | null }) =>
+    api.put(`/admin/users/${userId}/quota`, data),
+  forceLogout: (userId: string) => api.post(`/admin/users/${userId}/force-logout`, {}),
+  setUserStatus: (userId: string, isActive: boolean) =>
+    api.put(`/admin/users/${userId}/status`, { is_active: isActive }),
+  exportCsv: async (what: 'users' | 'activities', params: Record<string, string | number | undefined>, filename: string) => {
+    const res = await api.get('/admin/export', { params: { what, ...params }, responseType: 'blob' });
+    const url = URL.createObjectURL(res.data as Blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  },
 };
 
 export default api;

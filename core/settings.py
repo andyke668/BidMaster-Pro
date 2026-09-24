@@ -48,6 +48,21 @@ class Settings(BaseSettings):
 
     tender_text_max_chars: int = 32000
 
+    # ── 管理监控 / 会话（v0.4.0 新增）──
+    # 登录态 TTL；与原先 auth.py 里的 SESSION_TTL 保持一致（7 天）
+    session_ttl_seconds: int = 86400 * 7
+    # 心跳落库节流：每个活跃会话最多每 N 秒写一次 last_seen_at
+    presence_touch_seconds: int = 30
+    # 在线判定窗口：last_seen_at 在此窗口内即视为「在线」
+    presence_online_seconds: int = 180
+    # 行为流水 / token 流水保留天数，超期由后台协程清理
+    activity_retention_days: int = 90
+    # 日活与报表的自然日时区（库里存 naive UTC，展示按此时区换算）
+    report_timezone: str = "Asia/Shanghai"
+    # 每人每日默认配额，0 = 不限；被 user_quotas 表的按人配置覆盖
+    default_daily_action_quota: int = 0
+    default_daily_token_quota: int = 0
+
     model_config = {"env_file": ".env", "env_prefix": "BMP_", "extra": "ignore"}
 
     def get_database_url(self) -> str:

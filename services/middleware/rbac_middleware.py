@@ -11,29 +11,35 @@ from services.models import (
     RBACUserRole,
     RBACRolePermission,
 )
+from services.middleware import request_context, session_store
 
 
 async def get_current_user(
     request: Request, db: AsyncSession = Depends(get_db)
 ) -> User:
-    from services.routers.auth import verify_token
+    """解析 Bearer Token -> 会话表 -> 用户，并顺带完成两件事：
 
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    1. 刷新会话心跳（session_store.touch，带节流），这是「当前在线」的数据来源；
+    2. 把身份写入 ContextVar，深层的 LLM 网关据此把 token 消耗归到具体某个人。
+
+    登录态原先在 auth.py 的进程内字典里，现已迁到 user_sessions 表，
+    因此 API 重启不再全员掉线，也不再被「UVICORN_WORKERS 必须为 1」绑死。
+    """
+    client_ip, _ = session_store.client_meta(request)
+    token = session_store.bearer_token(request)
+    if not request.headers.get("Authorization", "").startswith("Bearer "):
         raise HTTPException(
             status_code=401,
             detail="未提供有效的Authorization头，请使用Bearer Token认证",
         )
-
-    token = auth_header[7:].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Token不能为空")
 
-    session = verify_token(token)
+    session = await session_store.get_session(db, token)
     if not session:
         raise HTTPException(status_code=401, detail="未登录或会话已过期")
 
-    user_id_str = session["user_id"]
+    user_id_str = session.user_id
     if not user_id_str or len(user_id_str) < 10:
         raise HTTPException(status_code=401, detail="无效的用户标识")
 
@@ -41,7 +47,22 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=401, detail="用户不存在")
+    # 判活用 `is False` 而不是 `not`：迁移前遗留的 NULL 行应继续按启用处理
+    if user.is_active is False:
+        raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员")
 
+    await session_store.touch(db, session.token_hash)
+    request_context.set_current_user(user, client_ip=client_ip)
+    # 供 ActivityMonitorMiddleware 归属身份：request.state 落在共享的
+    # scope["state"] 上，中间件在响应阶段还能读到，不需要再查一次库。
+    try:
+        request.state.bmp_user = {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.name,
+        }
+    except Exception:  # 极端情况下 scope 不可写，监控降级即可，不能挡住请求
+        pass
     return user
 
 
@@ -55,6 +76,7 @@ async def get_current_user_optional(
     try:
         return await get_current_user(request, db)
     except HTTPException:
+        request_context.set_current_user(None)
         return None
 
 

@@ -27,16 +27,21 @@ from core.exceptions import (
     ProjectNotFoundError,
 )
 from services.database import init_db, close_db, is_db_ready
-from services.routers import projects, interpret, generate, check, format_doc, skills, llm_config, news, knowledge, rbac, ai_image, auth, agent_runtime, mineru_config, api_key
+from services.middleware.route_activity import ActivityMonitorMiddleware
+from services.routers import projects, interpret, generate, check, format_doc, skills, llm_config, news, knowledge, rbac, ai_image, auth, agent_runtime, mineru_config, api_key, admin_monitor
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
     from services.skill_bootstrap import register_builtin_skills
-    from core.task_manager import TaskManager
+    from core.task_manager import TaskManager, set_activity_hook
     from services.database import async_session
+    from services.middleware.activity_logger import task_activity_hook
     register_builtin_skills()
+    # 异步任务（解读 / 全面检查 / 大纲生成…）的行为流水由这个钩子统一记录：
+    # 提交时落一条 running，结束时改成真实成败与耗时。core 层不反向依赖 services。
+    set_activity_hook(task_activity_hook)
     await init_db()
 
     try:
@@ -65,11 +70,56 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(tm._cleanup_interval)
             tm.cleanup_old_tasks()
 
+    async def _periodic_retention():
+        """按保留期清理行为流水 / token 流水 / 失效会话。
+
+        celery-beat 在本部署里没启动，所以直接挂在 lifespan 的 asyncio 协程上。
+        每小时醒一次，但只在跨过本地自然日边界时才真删，避免反复全表扫描。
+        """
+        from core.timeutil import local_day_start_utc
+        from services.middleware import activity_logger, session_store
+
+        retention_days = get_settings().activity_retention_days
+        last_purge_day = None
+        monitor_logger = logging.getLogger("monitor")
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                if not is_db_ready():
+                    continue
+                today = local_day_start_utc()
+                if last_purge_day == today:
+                    continue
+                last_purge_day = today
+                async with async_session()() as db:
+                    removed = await activity_logger.purge_old_logs(
+                        db, retention_days=retention_days
+                    )
+                    # 进程重启会留下永远停在 running 的流水，一并兜底标记为失败
+                    reaped = await activity_logger.reap_stale_running(db)
+                    sessions = await session_store.purge_expired(db)
+                    await db.commit()
+                monitor_logger.info(
+                    f"日志保留清理: 行为流水 {removed.get('activity', 0)} 条、"
+                    f"token 流水 {removed.get('llm_usage', 0)} 条、失效会话 {sessions} 条、"
+                    f"僵尸任务 {reaped} 条"
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                monitor_logger.warning(f"日志保留清理失败 (可忽略): {exc}")
+
     cleanup_task = asyncio.create_task(_periodic_cleanup())
+    retention_task = asyncio.create_task(_periodic_retention())
     yield
     cleanup_task.cancel()
+    retention_task.cancel()
     try:
         await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await retention_task
     except asyncio.CancelledError:
         pass
     await close_db()
@@ -78,7 +128,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="智多星标书辅助系统 API",
     description="智多星标书辅助系统（Resourceful Star）· 全流程智能招投标平台",
-    version="0.3.1",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -97,6 +147,11 @@ _electron_origins = [
 _extra_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
 if _extra_origins:
     _electron_origins.extend([o.strip() for o in _extra_origins.split(",") if o.strip()])
+
+# 行为流水：纯 ASGI 中间件，只包 send() 读状态码，对流式响应零干扰，
+# 且只处理白名单里的业务路径。放在 CORS 之前注册 => CORS 在外层，
+# 万一监控自身出错也不会吃掉跨域头。
+app.add_middleware(ActivityMonitorMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -166,11 +221,12 @@ app.include_router(ai_image.router, prefix="/api/ai-image", tags=["AI配图"])
 app.include_router(agent_runtime.router, prefix="/api/agent", tags=["多Agent编排"])
 app.include_router(mineru_config.router, prefix="/api/mineru", tags=["MinerU OCR"])
 app.include_router(api_key.router, prefix="/api/api-keys", tags=["API Key 管理"])
+app.include_router(admin_monitor.router, prefix="/api/admin", tags=["使用监控"])
 
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "app": "智多星标书辅助系统", "app_en": "Resourceful Star", "version": "0.3.1", "db_ready": is_db_ready()}
+    return {"status": "ok", "app": "智多星标书辅助系统", "app_en": "Resourceful Star", "version": "0.4.0", "db_ready": is_db_ready()}
 
 
 @app.get("/api/stats")

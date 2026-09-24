@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import sqlalchemy as sql
-from sqlalchemy import Column, String, Integer, Float, Boolean, Text, DateTime, ForeignKey, Enum, JSON, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Float, Boolean, Text, DateTime, ForeignKey, Enum, Index, JSON, UniqueConstraint
 from sqlalchemy.dialects.mysql import MEDIUMTEXT
 LongText = Text().with_variant(MEDIUMTEXT, "mysql")  # 部署补丁：PG 渲染为 TEXT
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -83,6 +83,10 @@ class User(Base):
     role = Column(String(20), default=UserRole.WRITER.value)
     avatar = Column(String(500), nullable=True)
     password_hash = Column(String(255), nullable=True)
+    # 管理后台「启用/禁用账号」。判活统一写 `is_active is False`，
+    # 这样迁移前的遗留 NULL 行仍按启用处理，不会因为加列把所有人锁在门外。
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_naive_utcnow)
     updated_at = Column(DateTime, default=_naive_utcnow, onupdate=_naive_utcnow)
 
@@ -438,3 +442,101 @@ class ApiKeyUsage(Base):
     client_ip = Column(String(64), nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_naive_utcnow, index=True)
+
+
+class UserSession(Base):
+    """登录会话（token 落库）。
+
+    原先登录态放在 routers/auth.py 的进程内字典 `_sessions`，三个硬伤：
+    ① API 容器一重启全员掉线；② uvicorn 被迫只能跑 1 个 worker，无法横向扩容；
+    ③「谁在线 / 最后登录时间 / 从哪个 IP 登录」根本没有数据源。
+    这里只存 sha256(token)（与 api_keys.key_hash 同一做法），明文 token 依然
+    只在登录响应里出现一次，库被拖走也无法直接劫持会话。
+    """
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        Index("ix_usession_user_seen", "user_id", "last_seen_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    client_ip = Column(String(64), nullable=True)
+    user_agent = Column(String(256), nullable=True)
+    created_at = Column(DateTime, default=_naive_utcnow)
+    last_seen_at = Column(DateTime, default=_naive_utcnow, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True, index=True)
+
+
+class UserActivityLog(Base):
+    """用户行为流水：管理后台「使用情况」的唯一数据源。
+
+    user_id 刻意不建外键——审计日志要在用户被删除后依然可查，所以同时冗余
+    user_email / user_name。
+    detail 只放非敏感元数据（检查类型、文件大小、任务号），**绝不写标书正文**；
+    resource_name / project_name 存项目名与文件名，仅持有 settings.monitor
+    权限的管理员可见。
+    status: running（异步任务已提交）/ success / failed（服务端异常）/
+            rejected（参数或权限被拒，即 4xx）——把用户输入错误与系统故障分开，
+            「失败率」才有意义。
+    """
+    __tablename__ = "user_activity_log"
+    __table_args__ = (
+        Index("ix_ual_user_created", "user_id", "created_at"),
+        Index("ix_ual_action_created", "action", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    user_id = Column(String(36), nullable=True, index=True)
+    user_email = Column(String(255), nullable=True)
+    user_name = Column(String(100), nullable=True)
+    action = Column(String(64), nullable=False, index=True)
+    resource_type = Column(String(32), nullable=True)
+    resource_id = Column(String(64), nullable=True)
+    resource_name = Column(String(500), nullable=True)
+    project_id = Column(String(36), nullable=True, index=True)
+    project_name = Column(String(200), nullable=True)
+    detail = Column(JSON, default=dict)
+    status = Column(String(16), default="success", nullable=False, index=True)
+    error_message = Column(Text, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    client_ip = Column(String(64), nullable=True)
+    user_agent = Column(String(256), nullable=True)
+    created_at = Column(DateTime, default=_naive_utcnow, index=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class LLMUsageLog(Base):
+    """LLM token 消耗流水，可按人 / 按动作 / 按模型聚合。
+
+    原先 gateway._record_usage 只往进程内 deque 里塞 model+tokens，没有用户维度，
+    且重启归零。这里落库后才算得出「每个检查员烧了多少 token」。
+    """
+    __tablename__ = "llm_usage_log"
+    __table_args__ = (
+        Index("ix_lul_user_created", "user_id", "created_at"),
+        Index("ix_lul_action_created", "action", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    user_id = Column(String(36), nullable=True, index=True)
+    action = Column(String(64), nullable=True)
+    model = Column(String(100), nullable=True)
+    prompt_tokens = Column(Integer, default=0, nullable=False)
+    completion_tokens = Column(Integer, default=0, nullable=False)
+    total_tokens = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=_naive_utcnow, index=True)
+
+
+class UserQuota(Base):
+    """每人每日用量配额。0 = 不限；无记录时回落到 settings 里的全局默认值。"""
+    __tablename__ = "user_quotas"
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    daily_action_limit = Column(Integer, default=0, nullable=False)
+    daily_token_limit = Column(Integer, default=0, nullable=False)
+    note = Column(String(256), nullable=True)
+    created_at = Column(DateTime, default=_naive_utcnow)
+    updated_at = Column(DateTime, default=_naive_utcnow, onupdate=_naive_utcnow)

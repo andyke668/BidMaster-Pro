@@ -2,7 +2,8 @@ INSERT INTO rbac_roles (id, name, display_name, description, is_system) VALUES
     ('00000000-0000-0000-0000-role00001', 'admin', '管理员', '系统管理员，拥有所有系统权限', TRUE),
     ('00000000-0000-0000-0000-role00002', 'project_manager', '项目经理', '管理项目和团队成员，可分配任务', FALSE),
     ('00000000-0000-0000-0000-role00003', 'writer', '撰写员', '编写和编辑投标文件内容', FALSE),
-    ('00000000-0000-0000-0000-role00004', 'reviewer', '审核员', '审核投标文件内容和检查报告', FALSE)
+    ('00000000-0000-0000-0000-role00004', 'reviewer', '审核员', '审核投标文件内容和检查报告', FALSE),
+    ('00000000-0000-0000-0000-role00005', 'bid_checker', '标书检查员', '上传招标/投标文件执行合规检查并导出报告', FALSE)
 ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================
@@ -44,7 +45,8 @@ INSERT INTO rbac_permissions (id, code, name, category, description) VALUES
     ('00000000-0000-0000-0000-perm00024', 'settings.view', '查看设置', 'settings', '查看系统设置'),
     ('00000000-0000-0000-0000-perm00025', 'settings.llm', '配置LLM', 'settings', '配置大语言模型参数'),
     ('00000000-0000-0000-0000-perm00026', 'settings.agent', '配置Agent', 'settings', '配置Agent工作流'),
-    ('00000000-0000-0000-0000-perm00027', 'settings.rbac', '管理权限', 'settings', '管理角色和权限')
+    ('00000000-0000-0000-0000-perm00027', 'settings.rbac', '管理权限', 'settings', '管理角色和权限'),
+    ('00000000-0000-0000-0000-perm00028', 'settings.monitor', '查看使用监控', 'settings', '查看全体成员的使用情况、在线状态、行为明细与 Token 消耗')
 ON CONFLICT (code) DO NOTHING;
 
 -- ============================================================
@@ -57,11 +59,14 @@ SELECT md5('rp-admin-' || p.code), r.id, p.id
 FROM rbac_roles r, rbac_permissions p WHERE r.name = 'admin'
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
--- 项目经理: 除 settings.rbac 和 settings.agent 外所有权限
+-- 项目经理: 除 settings.rbac / settings.agent / settings.monitor 外所有权限
+-- 这里是「排除法」：任何新增的敏感权限码都必须显式写进 NOT IN，
+-- 否则重跑种子脚本就会把它悄悄授给项目经理（与 rbac.py DEFAULT_ROLES 的 excluded 保持同步）。
 INSERT INTO rbac_role_permissions (id, role_id, permission_id)
 SELECT md5('rp-mgr-' || p.code), r.id, p.id
 FROM rbac_roles r, rbac_permissions p
-WHERE r.name = 'project_manager' AND p.code NOT IN ('settings.rbac', 'settings.agent')
+WHERE r.name = 'project_manager'
+  AND p.code NOT IN ('settings.rbac', 'settings.agent', 'settings.monitor')
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
 -- 撰写员: 项目读写 + 解读 + 生成 + 检查执行/导出 + 格式化执行 + 知识搜索
@@ -88,6 +93,17 @@ WHERE r.name = 'reviewer' AND p.code IN (
     'generate.review',
     'check.run', 'check.export', 'check.report',
     'format.run'
+)
+ON CONFLICT (role_id, permission_id) DO NOTHING;
+
+-- 标书检查员: 项目读写 + 解读 + 检查执行/导出/报告（不含生成与排版）
+INSERT INTO rbac_role_permissions (id, role_id, permission_id)
+SELECT md5('rp-bid_checker-' || p.code), r.id, p.id
+FROM rbac_roles r, rbac_permissions p
+WHERE r.name = 'bid_checker' AND p.code IN (
+    'project.create', 'project.read',
+    'interpret.upload', 'interpret.parse', 'interpret.view',
+    'check.run', 'check.export', 'check.report'
 )
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 

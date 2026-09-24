@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from services.database import get_db
 from services.middleware.rbac_middleware import get_current_user, require_permission
+from services.middleware.quota import enforce_quota
 from services.models import (
     Project, Document, Analysis, Chapter, CheckReport,
     ProjectStatus, CheckType,
@@ -27,7 +28,13 @@ from core.task_manager import AsyncTask, TaskManager
 from core.settings import get_settings
 
 logger = logging.getLogger(__name__)
-router = APIRouter(dependencies=[Depends(get_current_user)])
+# enforce_quota：每人每日用量配额。只统计写操作，GET 轮询一律放过。
+router = APIRouter(
+    dependencies=[
+        Depends(get_current_user),
+        Depends(enforce_quota),
+    ]
+)
 
 
 async def _get_owned_project(

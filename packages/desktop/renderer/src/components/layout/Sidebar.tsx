@@ -8,6 +8,7 @@ import {
   FileText,
   Newspaper,
   Settings,
+  Activity,
   ChevronRight,
   AlertCircle,
 } from 'lucide-react';
@@ -28,6 +29,7 @@ const pipelineSteps = [
 const otherNavItems = [
   { path: '/news', icon: Newspaper, label: '资讯中心', desc: '今日热点/商机', color: '#3b82f6' },
   { path: '/settings', icon: Settings, label: '平台设置', desc: '模型/权限/技能', color: '#475569' },
+  { path: '/admin', icon: Activity, label: '使用监控', desc: '在线/用量/告警/配额', color: '#7c3aed' },
 ];
 
 const EXPANDED_WIDTH = 260;
@@ -95,6 +97,7 @@ export default function Sidebar() {
   const visibleOtherNav = otherNavItems.filter(item => {
     if (item.path === '/settings') return hasModulePerm('settings');
     if (item.path === '/news') return hasModulePerm('news');
+    if (item.path === '/admin') return isSystemAdmin || userPermissions.includes('settings.monitor');
     return false;
   });
   const hasAnyPermission = userPermissions.length > 0 || isSystemAdmin;

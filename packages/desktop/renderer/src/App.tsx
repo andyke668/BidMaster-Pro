@@ -7,6 +7,7 @@ import CheckPage from './pages/CheckPage';
 import FormatPage from './pages/FormatPage';
 import NewsPage from './pages/NewsPage';
 import SettingsPage from './pages/SettingsPage';
+import AdminMonitorPage from './pages/AdminMonitorPage';
 import LoginPage from './pages/LoginPage';
 import { useAppStore } from './stores/appStore';
 
@@ -23,6 +24,20 @@ function PublicOnlyRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (token) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  return <>{children}</>;
+}
+
+function MonitorRoute({ children }: { children: React.ReactNode }) {
+  const user = useAppStore((s) => s.user);
+  const permissions = useAppStore((s) => s.permissions) || [];
+  const isSystemAdmin = user?.roles?.some(r => r.name === 'admin') ?? false;
+
+  // 监控页看得到全员项目名与标书文件名，必须精确到 settings.monitor 这一条权限，
+  // 不能沿用「有任意 settings.* 就算过」的宽松前缀匹配。
+  if (!isSystemAdmin && !permissions.includes('settings.monitor')) {
     return <Navigate to="/dashboard" replace />;
   }
 
@@ -56,6 +71,7 @@ export default function App() {
         <Route path="/format" element={<PermissionRoute module="format"><FormatPage /></PermissionRoute>} />
         <Route path="/news" element={<PermissionRoute module="news"><NewsPage /></PermissionRoute>} />
         <Route path="/settings" element={<PermissionRoute module="settings"><SettingsPage /></PermissionRoute>} />
+        <Route path="/admin" element={<MonitorRoute><AdminMonitorPage /></MonitorRoute>} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>
