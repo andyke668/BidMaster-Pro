@@ -1517,7 +1517,11 @@ async def set_user_status(
         resource_type="user",
         resource_id=str(user.id),
         resource_name=user.name,
-        status="success" if data.is_active else "rejected",
+        # 禁用成功也是「成功」，不能记成 rejected。rejected 的语义是 4xx 被拒，
+        # 记错了会：① 行为流水里把一次正常的封号显示成「被拒」；② 抬高该管理员
+        # 的拒绝数并稀释失败率分母（denominator = total - rejected - running）。
+        # 启用还是禁用已经由 detail.is_active 表达，不需要借用状态字段。
+        status="success",
         detail={"is_active": bool(data.is_active)},
         client_ip=session_store.client_meta(request)[0],
     )
