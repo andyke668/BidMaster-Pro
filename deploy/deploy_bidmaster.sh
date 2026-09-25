@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # BidMaster Pro — Docker 部署脚本
-# 目标机：192.168.50.31 (ubuntu-test, Ubuntu 24.04.1, 4C/5.8G, Docker 28.5.1)
+# 目标机：默认 192.168.50.31（测试）；生产 192.168.50.16 需带 PROJECT=zdx 等覆盖，见 §17
 #
 # 用法：
 #   bash deploy_bidmaster.sh          # 全流程（取码→补丁→配置→拉镜像→构建→启动）
@@ -239,7 +239,7 @@ SQL
   git add -A
   if ! git diff --cached --quiet; then
     git -c user.name='deploy-bot' -c user.email='deploy@local' commit -q \
-      -m "deploy(192.168.50.31): 钉 chromadb<1.0、补 bcrypt、去 sentence-transformers、pip/npm 换国内源"
+      -m "deploy(${HOST_ADDR}): 钉 chromadb<1.0、补 bcrypt、去 sentence-transformers、pip/npm 换国内源"
     git branch -f deploy/local HEAD
     echo "  - 已提交为本地补丁（分支 deploy/local）"
   else

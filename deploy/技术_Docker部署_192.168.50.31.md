@@ -651,3 +651,158 @@ web: sha256:1289249606220f1d87b626f3855d87b57665381627e04e12330a7d47607046b2
 - 登录态已迁到 `user_sessions` 表：**升级后所有人要重新登录一次**（进程内 token 全部作废）。
 - 管理员侧边栏新增「使用监控」；非管理员访问 `/zdx/admin` 会被前端挡回，直接调接口返回 403。
 - 磁盘余量紧张（87% 已用）：本次靠 `docker image prune -f` 与构建缓存撑过，后续发版前先看 `docker system df`。
+
+## 17. v0.4.0 上线到生产机 192.168.50.16（2026-09-25）
+
+### 17.1 生产机与测试机的关键差异
+
+| 项 | 192.168.50.31（测试） | 192.168.50.16（生产） |
+|---|---|---|
+| 主机名 | ubuntu-test | ubuntuserver |
+| 规格 | 4C / 5.8G，磁盘曾用到 88% | 30G 内存 / 1005G 磁盘（仅用 3%） |
+| compose 项目名 | `bidmaster` | **`zdx`** |
+| 容器数 | postgres + api + web | 再加 **celery-worker / celery-beat / mysql / redis / minio / minio-init** |
+| compose profiles | 不需要 | **必须带 `--profile infra --profile web`** |
+| api 端口绑定 | 0.0.0.0:8000 | **127.0.0.1:8000** |
+| api 内存上限 | 1g | **2g** |
+| 同机还跑着 | OpenBidKit | **宝塔面板（80 / 888）**，其 nginx 与本系统无关 |
+
+生产机的 `docker/docker-compose.override.yml` 是手工改过的（`name: zdx` + api 2g），
+而脚本原先把这两项写死成 `bidmaster` / `1g`。**按默认参数直接跑会在生产机上另起
+一套平行栈**：全新数据卷等于空库，且 8081 / 8000 / 5432 端口全部冲突。
+
+访问入口与测试机一致：`http://192.168.50.16:8081/zdx/`（根路径按设计 404），
+管理后台 `http://192.168.50.16:8081/zdx/admin`。升级不改网址，用户无感。
+
+### 17.2 本次为生产机修掉的两个脚本缺陷
+
+**① `e236dd0` — compose 项目名与内存上限参数化**
+
+新增 `PROJECT` / `API_MEM_LIMIT` / `PG_MEM_LIMIT` / `WEB_MEM_LIMIT` 四个变量，
+override 的 heredoc 从 `<<'EOF'` 改成 `<<EOF` 以便展开。生产机传
+`PROJECT=zdx API_MEM_LIMIT=2g`，生成结果与原有手工版本语义完全一致。
+
+**② `766c03e` — 防止 `API_PORT` / `WEB_PORT` 泄漏进 compose**
+
+这两个名字**同时是 `docker/.env` 里的 compose 插值变量**，而 shell 环境变量的
+优先级高于 `.env`。脚本自己又用同名变量做探活，于是只要调用方 `export
+API_PORT=8000`，compose 就会拿它覆盖 `.env` 里的 `127.0.0.1:8000`，把 api 从
+「仅回环」静默改成「0.0.0.0 全网卡暴露」。
+
+修复：compose 调用统一走 `env -u API_PORT -u WEB_PORT docker compose ...`，
+端口绑定只由 `.env` 决定；新生成的 `.env` 也默认把 api 绑到回环。
+
+> 这个坑当天真的踩到了：`up` 之后 `docker port zdx-api-1` 变成 `0.0.0.0:8000`。
+> 用干净环境执行 `docker compose -p zdx --profile infra --profile web up -d api`
+> 重建即恢复 `127.0.0.1:8000`，从内网探测 8000 已关闭。
+> **教训：给 compose 项目传环境变量前，先确认变量名不与 `.env` 的插值变量重名。**
+
+### 17.3 顺带修掉的生产遗留问题：celery 版本错位
+
+升级前 `zdx-api-1` 用镜像 `b208cba4f9df`（构建于 09-10 07:40），而
+`zdx-celery-worker-1` / `zdx-celery-beat-1` 用的是 `b7e48dd7c838`（09-10 06:51，
+标签已丢失）。即 **celery 比 api 旧了整整两周** —— 因为历次部署的 `SERVICES`
+只有 `postgres api web`，从没带上 celery。
+
+三个服务在 compose 里都是 `dockerfile: docker/Dockerfile.api` +
+`image: bidmaster-pro-api:latest`，所以一起放进 `SERVICES` 即可对齐。升级后三者
+同为 `abb37773dec1`，旧镜像 `b7e48dd7c838` 已无任何引用。
+
+> **以后部署生产机，`SERVICES` 必须写 `api web celery-worker celery-beat`。**
+> `postgres` 不必列进去（镜像不变时列了也是 no-op，但少碰一个服务少一分风险）。
+
+### 17.4 生产机的执行方式（与测试机不同之处）
+
+`andy` 原先不在 `docker` 组，需先 `sudo usermod -aG docker andy`。若 SSH 会话是
+长连接、组变更不生效，用 `sg docker -c '<命令>'` 包一层即可，无需重连或重启。
+
+```bash
+# 公共环境变量（注意：不要 export API_PORT / WEB_PORT）
+export PROJECT=zdx HOST_ADDR=192.168.50.16 WEB_BASE=/zdx
+export API_MEM_LIMIT=2g PG_MEM_LIMIT=512m WEB_MEM_LIMIT=128m
+export PG_USER=bidmaster PG_DB=bidmaster
+export SERVICES="api web celery-worker celery-beat"
+
+cd ~/deploy
+bash deploy_bidmaster.sh code      # 取码 + 补丁 + 写配置（.env 存在即保留）
+bash deploy_bidmaster.sh migrate   # 001_admin_monitor.sql，幂等、零停机
+bash deploy_bidmaster.sh pull      # 补拉 python:3.12-slim / node:20-alpine / nginx:1.27-alpine
+bash deploy_bidmaster.sh up        # 构建 + 重建（约 21 分钟，apt 走 deb.debian.org 最慢）
+bash deploy_bidmaster.sh seed      # 等健康 + 灌种子（幂等）
+
+# 验证（不要跑 e2e_admin_monitor.sh，理由见 17.6）
+export ADMIN_EMAIL=<管理员邮箱> ADMIN_PASS=<密码>
+bash verify_bidmaster.sh
+```
+
+`llm` 步骤**不用跑**：生产机 `docker/.env` 里 `LLM_API_KEY` / `EMBEDDING_API_KEY`
+早已填好，走内网网关 `http://192.168.40.113:8088/v1`，模型 `qwen3.8-max` /
+`qwen3.7-text-embedding`，与测试机同一套。
+
+`up` 之前若担心 `.env` 被 `write_config` 追加端口前缀，可先把
+`REDIS_EXTERNAL_PORT` / `MINIO_API_PORT` / `MINIO_CONSOLE_PORT` 按当前实际值占位
+（生产机是 `16379` / `19000` / `19001`，绑 0.0.0.0），脚本的 `grep -q "^KEY="`
+就会跳过追加，从而不改动既有暴露面。
+
+### 17.5 验证结果（全部通过）
+
+- 8 个容器全部 healthy；`postgres / redis / mysql / minio` 未被触碰（仍 Up 2 weeks）
+- `/api/health` → `version 0.4.0, db_ready true`
+- `/zdx/` 200、`/zdx/api` 反代 200、根路径 404、`/zdx/admin` SPA 回退 200
+- 匿名访问 `/api/admin/overview` → 401；权限码 `settings.monitor` 已入库
+- 管理员可读总览：`users{total:11, active:11, disabled:0}`、`presence{online:1}`、
+  `timezone Asia/Shanghai`
+- 表数 22 → 26（新增 `user_sessions` / `user_activity_log` / `user_quotas` /
+  `llm_usage_log`），`users.is_active` 默认 `true`，11 个用户无一被锁
+- 数据完好：users=11、projects=2、RBAC 角色 5、权限 28、Agent 配置 7
+- 监控已在真实记录：`user_sessions=2`、`user_activity_log=2`
+- 资源：api 127MiB/2GiB、web 6MiB/128MiB、celery-worker 88MiB/1GiB、
+  celery-beat 71MiB/512MiB、postgres 37MiB/512MiB
+- 从内网实测：8081 可达且返回 0.4.0；**8000 已不可达**（符合预期）
+
+### 17.6 为什么生产机不跑 e2e_admin_monitor.sh
+
+`verify_bidmaster.sh` 只有一次写操作（管理员登录），其余全是健康检查与只读查询，
+可安全在生产执行。而 `e2e_admin_monitor.sh` 会**创建假用户与假项目、真的调用
+`/api/check/{id}/full-check` 触发 LLM 消耗**，事后再删除。在生产库上跑它会污染
+监控数据、白烧 token，且清理若中途失败会留下脏数据。该脚本已在测试机 31 上用
+同一份代码、同一个迁移跑通 56/56，无需在生产重复。
+
+### 17.7 回滚方法
+
+回滚锚点在升级前已打好标签，且数据库有完整备份：
+
+```bash
+# 镜像锚点（v0.3.1）
+#   bidmaster-pro-api:rollback-v0.3.1 = b208cba4f9df
+#   bidmaster-pro-web:rollback-v0.3.1 = 96ea7fd43367
+cd ~/bidmaster-pro/docker
+docker tag bidmaster-pro-api:rollback-v0.3.1 bidmaster-pro-api:latest
+docker tag bidmaster-pro-web:rollback-v0.3.1 bidmaster-pro-web:latest
+env -u API_PORT -u WEB_PORT docker compose -p zdx --profile infra --profile web \
+  up -d api web celery-worker celery-beat
+
+# 如需回退数据库（注意：001 迁移是纯增量、向后兼容，v0.3.1 代码可直接跑在
+# 迁移后的库上，通常无需回滚数据库）
+TS=$(cat ~/backup/.last_ts)
+zcat ~/backup/bidmaster_pg_$TS.sql.gz | \
+  docker exec -i zdx-postgres-1 psql -U bidmaster -d bidmaster
+```
+
+备份清单（`~/backup/`，时间戳见 `.last_ts`）：
+`bidmaster_pg_<TS>.sql.gz`（118KB，已验证 gzip 完整、22 张表 COPY 齐全、
+users 11 行）、`env.<TS>.bak`、`docker-compose.override.yml.<TS>.bak`、
+`volumes_<TS>/{uploads,projects,chroma}.tgz`。
+
+### 17.8 生产机遗留待办
+
+1. **`admin@bidmaster.pro` 仍是种子默认密码 `admin123`**（哈希与 `db/seed_pg.sql`
+   完全一致）。这是生产环境的管理员账号，必须立即改密，或干脆停用该账号、
+   只保留 `andy@qq.com`（RBAC 已是 admin，密码为自设 bcrypt）。
+2. `redis`（16379，无密码）、`minio`（19000/19001，桶可匿名下载）、`mysql`（3306）
+   目前都绑 `0.0.0.0`，对整个内网开放。脚本本会把它们收敛到 `127.0.0.1`，
+   本次为不改变既有行为而保留原状。建议确认没有外部依赖后收紧。
+3. 升级后**所有人都需要重新登录一次**（登录态已从进程内字典迁到 `user_sessions`
+   表）。
+4. `~/bidmaster-pro` 的 `main` 分支上带着一个部署补丁提交（`deploy/local` 同步
+   指向它），提交信息现在会显示实际目标机 IP，不再是硬编码的 50.31。
