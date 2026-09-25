@@ -36,6 +36,11 @@ SERVICES="${SERVICES:-postgres api web}"
 PROJECT="${PROJECT:-bidmaster}"
 PG_USER="${PG_USER:-bidmaster}"
 PG_DB="${PG_DB:-bidmaster}"
+# 资源上限：各目标机余量差别很大（50.31 是 5.8G 纯测试机；50.16 是生产机，
+# 还并跑宝塔面板/MySQL/MinIO/Redis），必须可按机覆盖，不能写死。
+API_MEM_LIMIT="${API_MEM_LIMIT:-1g}"
+PG_MEM_LIMIT="${PG_MEM_LIMIT:-512m}"
+WEB_MEM_LIMIT="${WEB_MEM_LIMIT:-128m}"
 
 # ── 内网 LLM 网关（复用 openbidkit-web 的 YIBIAO_AI_API_KEY）──
 LLM_SRC_ENV="${LLM_SRC_ENV:-$HOME/openbidkit-web/.env}"
@@ -312,29 +317,32 @@ EOF
     grep -q "^${key}=" .env || { echo "$kv" >> .env; echo "  - 追加 ${key}（仅绑定 127.0.0.1）"; }
   done
 
-  cat > docker-compose.override.yml <<'EOF'
+  # 这里必须用不带引号的 EOF，让 ${PROJECT} 与内存上限展开。
+  # 曾经把项目名写死成 bidmaster —— 在 compose 项目名为 zdx 的生产机上会另起
+  # 一套平行栈（全新数据卷 = 空库，且 8081/8000/5432 端口冲突），务必参数化。
+  cat > docker-compose.override.yml <<EOF
 # 部署期覆盖文件（由 deploy_bidmaster.sh 生成）
-# 作用：1) 固定 compose 项目名；2) 按 5.8G 内存机器（已跑 OpenBidKit）收紧资源上限
-name: bidmaster
+# 作用：1) 固定 compose 项目名；2) 按目标机内存余量收紧资源上限
+name: ${PROJECT}
 
 services:
   api:
     deploy:
       resources:
         limits:
-          memory: 1g
+          memory: ${API_MEM_LIMIT}
   postgres:
     deploy:
       resources:
         limits:
-          memory: 512m
+          memory: ${PG_MEM_LIMIT}
   web:
     deploy:
       resources:
         limits:
-          memory: 128m
+          memory: ${WEB_MEM_LIMIT}
 EOF
-  echo "  - 已生成 docker/docker-compose.override.yml（项目名 bidmaster + 内存上限）"
+  echo "  - 已生成 docker/docker-compose.override.yml（项目名 ${PROJECT}，内存 api=${API_MEM_LIMIT} pg=${PG_MEM_LIMIT} web=${WEB_MEM_LIMIT}）"
 }
 
 # ─────────────────── 4. 预拉基础镜像（走国内镜像源） ───────────────────
