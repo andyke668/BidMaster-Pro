@@ -65,6 +65,8 @@
 
 - `services/routers/auth.py` 在类型注解里用了 `Request` 但从未 import，属于一启动就会 NameError 的潜在故障，本次重写一并修掉。
 - 时间口径统一：库里是 naive UTC，使用者在 Asia/Shanghai。所有「今日 / 按天趋势 / 活跃天数」都经 `core/timeutil.py` 换算，避免北京时间 08:00 之前的行为被算进昨天。
+- 行为流水在写入时补齐项目名：纯 ASGI 中间件只看 URL，拿得到 `project_id` 却拿不到项目名，导致排版 / 导出报告 / 上传解析等同步动作在「行为流水」里项目名列空白。现统一在 `activity_logger._insert_activity` 落库前补齐——放在写入时而非读取时 join，项目日后改名或被删，审计流水仍留当时的名字。
+- 「禁用账号」不再误记为 `rejected`：该状态的语义是 4xx 被拒（用户填错参数或无权限），误记会抬高该管理员的拒绝数并稀释失败率分母（`denominator = total - rejected - running`）；启用/禁用的方向改由 `detail.is_active` 表达。
 
 ### 🔒 隐私与权限边界
 
@@ -74,9 +76,18 @@
 
 ### 🧪 验证（Verification）
 
-- `测试/verify_admin_monitor.py`：190 项断言全部通过——模块导入与 FastAPI 路由注册（强制求值全部端点注解）、SQLAlchemy 模型建表 DDL、时间口径换算、路由白名单解析、ASGI 中间件行为（流式透传 / 4xx-5xx-异常分档 / 无身份不记 / websocket 透传）、TaskManager 在途任务与钩子、配额计数、会话表数据流（SQLite 内存库）、RBAC 默认权限。
+- `测试/verify_admin_monitor.py`：194 项断言全部通过——模块导入与 FastAPI 路由注册（强制求值全部端点注解）、SQLAlchemy 模型建表 DDL、时间口径换算、路由白名单解析、ASGI 中间件行为（流式透传 / 4xx-5xx-异常分档 / 无身份不记 / websocket 透传）、TaskManager 在途任务与钩子、配额计数、会话表数据流（SQLite 内存库）、RBAC 默认权限、行为流水落库时补齐项目名。
+- `deploy/e2e_admin_monitor.sh`：服务器端 56 项端到端断言全部通过——匿名 401 / 非管理员 403 / 14 个端点返回结构 / 6 个时间区间 / 行为归属与项目名 / 配额 429 / GET 轮询不限流 / 强制下线 / 禁用启用 / CSV 导出；跑完自动清理临时账号。
 - 前端 `tsc --noEmit` 零错误，`vite build` 生产构建通过（2735 模块）。
 - 后端全量 `compileall` 通过。
+- 192.168.50.31 实测：浏览器打开 `/zdx/admin` 七个页签全部渲染真实数据，控制台零报错。
+
+### 🚀 部署（Deployment）
+
+- 部署与验证工具入库 `deploy/`：`deploy_bidmaster.sh`、`verify_bidmaster.sh`、`e2e_admin_monitor.sh`、`技术_Docker部署_192.168.50.31.md`。
+- 升级顺序：`code` → `migrate` → `llm` → `up` → `seed`。迁移只增不改（4 张新表 + `users` 补 2 列），先 migrate 再重启 api 无停机窗口。
+- 站点只发布 `/zdx/` 子路径（根路径按设计返回 404）；管理后台入口 `/zdx/admin`。
+- **升级后全员需重新登录一次**：登录态已从进程内字典迁到 `user_sessions` 表，旧 token 全部作废。
 
 ---
 
