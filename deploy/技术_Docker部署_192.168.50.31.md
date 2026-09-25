@@ -806,3 +806,67 @@ users 11 行）、`env.<TS>.bak`、`docker-compose.override.yml.<TS>.bak`、
    表）。
 4. `~/bidmaster-pro` 的 `main` 分支上带着一个部署补丁提交（`deploy/local` 同步
    指向它），提交信息现在会显示实际目标机 IP，不再是硬编码的 50.31。
+
+### 17.9 为什么生产机比测试机慢得多：构建缓存冷热，不是机器性能
+
+生产机 `up` 步骤实测 **21 分 15 秒**（04:40:33 → 05:01:48）。各阶段耗时（前三者并行）：
+
+| 阶段 | 耗时 | 拉包源 | 是否换国内源 |
+|---|---|---|---|
+| `#16` api runtime `apt-get`（LibreOffice 等 181 包 / 222MB） | **1208.9s** | `deb.debian.org` | **否** |
+| `#17` web `npm ci` | 729.5s | npmmirror | 是 |
+| `#15` api builder `apt-get`（build-essential 等） | 714.6s | `deb.debian.org` | **否** |
+| `#20` api `pip install` | 147.9s | aliyun | 是 |
+| `#22` `npm run build` | 12.1s | — | — |
+| 其余所有阶段 | 各 < 45s | — | — |
+
+关键路径 = `#16` 的 1209s，占总时长 **95%**。实测 `libllvm19` 26MB 下载耗时 66 秒（约 400KB/s）。
+
+**对照实验**：同一台生产机、同一份代码，缓存变热之后再跑
+`docker compose build api` → **2 秒**，所有层 `CACHED`。冷 1269s vs 热 2s ≈ **630 倍**。
+
+**测试机为什么快**：§16 已记录「未改依赖，镜像构建全部走缓存，api 容器 19 秒恢复
+healthy」。31 上 `python:3.12-slim` / `node:20-alpine` / `nginx:1.27-alpine` 三个基础
+镜像都在，Build Cache 105 条 / 4.622GB，两周内被反复构建过（v0.2.0→v0.3.0→v0.3.1→v0.4.0），
+apt 那层早已是缓存命中。生产机相反：上次构建是 09-10（两周前），且三个基础镜像**全都不在**
+（期间被 prune 过），Build Cache 冷启动，每层都得真跑。
+
+结论：**慢的根因是缓存冷热，不是机器**。生产机 30G 内存 / 1005G 磁盘仅用 3%，
+远强于测试机 5G 内存 / 48G 磁盘用到 88%。而缓存命中时，
+「`Dockerfile.api` 的 apt 没换国内源」这个缺陷完全隐形，一旦冷启动就放大成 20 分钟。
+
+**提速措施（按收益排序）**：
+1. 给 `Dockerfile.api` 两处 `apt-get`（第 19 行 builder、第 60 行 runtime）换国内源，
+   预期把 1209s 压到 1–2 分钟。pip / npm 都已换，唯独 apt 漏了。
+2. **不要在生产机 prune 基础镜像与 build cache**——它有 941G 空闲，没有清理的必要。
+   测试机是因为磁盘只剩 5.8G 才被迫清缓存（见 §3 磁盘行），生产机不存在这个约束。
+3. `SERVICES` 固定为 `api web celery-worker celery-beat`。注意 api / celery-worker /
+   celery-beat 三者都写了 `build:` 且共用 `image: bidmaster-pro-api:latest`，bake 会
+   **把同一个 Dockerfile 构建三次**，只因 `com.docker.compose.service` 标签不同就产出
+   三个不同镜像 ID，互相抢同一个 `latest` 标签（见 17.10）。可考虑给两个 celery 服务
+   去掉 `build:` 只留 `image:`，并保证 `api` 始终在 `SERVICES` 里。
+
+### 17.10 一次多余的 `build` 把 `latest` 标签移走了（已确认无影响，但记录在案）
+
+为取得「热缓存耗时」这个对照数据，在生产机上执行了一次 `docker compose build api`。
+它是纯缓存命中（2 秒），**但把 `bidmaster-pro-api:latest` 从 `abb37773dec1` 移到了
+`d771b5973a1b`** —— 后者正是原始 `up --build` 时 bake 为 `api` 服务构建的那个变体，
+两者出自同一次构建、同一份缓存，仅 `com.docker.compose.service` 标签不同。
+
+事实核对：
+- 运行中的 api / celery-worker / celery-beat 仍绑定 `abb37773dec1`，全部 healthy，
+  `/api/health` 返回 0.4.0，api 与 web 日志 0 个 5xx，真实用户正常在线使用。
+- Docker 29.8 使用 **containerd 镜像存储**（`io.containerd.snapshotter.v1`）。
+  `abb37773dec1` 失去标签后即从镜像列表消失（`docker image inspect` 报
+  `No such image`），但容器快照受保护，运行与 `restart: unless-stopped` 自动重启
+  都不受影响（重启用的是容器自身绑定的镜像，不查 `latest`）。
+- `up -d --dry-run` 显示：若此刻执行 `up -d`，会重建 api + celery-worker +
+  celery-beat（约 15–30 秒中断），web 不动。
+- 回滚锚点 `bidmaster-pro-{api,web}:rollback-v0.3.1` 完好未受影响。
+
+**处置：不重建。** 当时有真实用户在线（`andy@qq.com`、`xwy@qq.com` 13:15 前后登录），
+为两个功能等价的镜像制造一次生产重启不划算；该差异会在下次正常部署时自动收敛。
+
+> **教训：不要在生产机上为了取基准数据而跑 `build`，即使确信是纯缓存命中——
+> 它仍会移动镜像标签，制造「运行中的镜像 ≠ latest」的不一致。**
+> 要测缓存命中速度，去测试机测，或用 `--dry-run` / `docker buildx du` 这类只读手段。
