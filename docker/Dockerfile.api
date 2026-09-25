@@ -10,8 +10,11 @@
 # APT 国内镜像源。官方源 deb.debian.org 在境内实测仅 0.13 MB/s，单是 runtime
 # 阶段那 223 MB 依赖就要 20 分钟（生产机首建该层实测 1208.9 s）；换
 # mirrors.ustc.edu.cn（实测 34.6 MB/s）后同一层只要 30 s，约 40 倍提速。
-# 覆盖方式：docker build --build-arg APT_MIRROR=... 或 .env 里的 APT_MIRROR
+# 覆盖方式：docker build --build-arg APT_MIRROR=mirrors.tuna.tsinghua.edu.cn ...
 # 备选：mirrors.tuna.tsinghua.edu.cn（14.8 MB/s）、mirrors.aliyun.com（2.6 MB/s）
+# 注意：docker-compose.yml 没有把这个 ARG 接到 build.args，所以写 .env 不生效——
+# 那是有意的。compose 的 ${VAR} 插值会被 shell 环境变量覆盖，本项目已经因此
+# 踩过一次坑（API_PORT/WEB_PORT 泄漏，见 commit 766c03e），不想再加一个同类入口。
 ARG APT_MIRROR=mirrors.ustc.edu.cn
 
 # ─────────────── Stage 1: builder ───────────────
