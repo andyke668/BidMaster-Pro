@@ -52,7 +52,12 @@ GW_EMBED_MODEL="${GW_EMBED_MODEL:-qwen3.7-text-embedding}"
 # 一旦启用它们就会被当作依赖一并拉起，所以必须一起预拉，否则会去连 Docker Hub 超时。
 BASE_IMAGES="${BASE_IMAGES:-python:3.12-slim node:20-alpine nginx:1.27-alpine postgres:16-alpine redis:7-alpine minio/minio:latest minio/mc:latest}"
 
-COMPOSE=(docker compose -p "$PROJECT")
+# 注意：API_PORT / WEB_PORT 这两个名字同时是 docker/.env 里的 compose 插值变量，
+# 而 shell 环境变量优先级高于 .env。若调用方 export 了它们（本脚本自己也用同名
+# 变量做探活），compose 就会用命令行的值覆盖 .env 里的 "127.0.0.1:8000"，
+# 把 api 端口从仅回环静默改成 0.0.0.0 全网卡暴露。这里显式剔除，保证端口绑定
+# 只由 docker/.env 决定。
+COMPOSE=(env -u API_PORT -u WEB_PORT docker compose -p "$PROJECT")
 
 say() { printf '\n\033[1;36m=== [%s] %s ===\033[0m\n' "$(date '+%F %T')" "$*"; }
 die() { printf '\n\033[1;31m[FAIL] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -270,7 +275,7 @@ POSTGRES_PASSWORD=${pg_pass}
 POSTGRES_PORT=127.0.0.1:5432
 
 # ── 端口 ──
-API_PORT=${API_PORT}
+API_PORT=127.0.0.1:${API_PORT}
 WEB_PORT=${WEB_PORT}
 
 # ── CORS ──
