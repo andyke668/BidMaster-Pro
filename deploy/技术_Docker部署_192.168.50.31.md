@@ -836,8 +836,10 @@ apt 那层早已是缓存命中。生产机相反：上次构建是 09-10（两�
 「`Dockerfile.api` 的 apt 没换国内源」这个缺陷完全隐形，一旦冷启动就放大成 20 分钟。
 
 **提速措施（按收益排序）**：
-1. 给 `Dockerfile.api` 两处 `apt-get`（第 19 行 builder、第 60 行 runtime）换国内源，
-   预期把 1209s 压到 1–2 分钟。pip / npm 都已换，唯独 apt 漏了。
+1. ~~给 `Dockerfile.api` 两处 `apt-get`（第 19 行 builder、第 60 行 runtime）换国内源，
+   预期把 1209s 压到 1–2 分钟。pip / npm 都已换，唯独 apt 漏了。~~
+   **✅ 已实施（见 §17.11）**：换 `mirrors.ustc.edu.cn` 后该层实测 **30.0s**（优于预期），
+   builder 层 714.6s → 15.7s。瓶颈随即转移到 `web npm ci`（729.5s）与 `pip install`。
 2. **不要在生产机 prune 基础镜像与 build cache**——它有 941G 空闲，没有清理的必要。
    测试机是因为磁盘只剩 5.8G 才被迫清缓存（见 §3 磁盘行），生产机不存在这个约束。
 3. `SERVICES` 固定为 `api web celery-worker celery-beat`。注意 api / celery-worker /
@@ -870,3 +872,71 @@ apt 那层早已是缓存命中。生产机相反：上次构建是 09-10（两�
 > **教训：不要在生产机上为了取基准数据而跑 `build`，即使确信是纯缓存命中——
 > 它仍会移动镜像标签，制造「运行中的镜像 ≠ latest」的不一致。**
 > 要测缓存命中速度，去测试机测，或用 `--dry-run` / `docker buildx du` 这类只读手段。
+
+### 17.11 apt 换国内源实施与实测（2026-09-25）
+
+§17.9 列的第 1 条提速措施已落地：`docker/Dockerfile.api` 两处 `apt-get` 前加换源 `sed`，
+镜像地址由构建参数 `ARG APT_MIRROR` 控制，默认 `mirrors.ustc.edu.cn`。
+
+**改法**（builder 与 runtime 两个 stage 各一处；全局 `ARG` 不跨 stage 继承，
+每个 stage 内都要重新声明一行 `ARG APT_MIRROR`）：
+
+```dockerfile
+ARG APT_MIRROR=mirrors.ustc.edu.cn
+
+FROM python:3.12-slim AS builder
+ARG APT_MIRROR
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends ...
+```
+
+`python:3.12-slim` 是 Debian 13 trixie，源文件是 deb822 格式的
+`/etc/apt/sources.list.d/debian.sources`（`/etc/apt/sources.list` 已不存在）；两条 `sed`
+分别覆盖新老两种格式，第二条对不存在的文件静默失败即可——分号连接，`RUN` 退出码由末尾的
+`apt-get` 决定。该文件含 `debian` 与 `debian-security` 两个 stanza，一条 `s|...|g` 同时改掉。
+
+**为什么选中科大**（测试机 31 实测，同一网络，取样 2–3 轮）：
+
+| 源 | `apt-get update` | 12.7MB `Packages.gz` | 22.5MB wheel（pip 侧） |
+|---|---|---|---|
+| `deb.debian.org` / `pypi.org` | 34.4s | 0.13 MB/s | 0.39 MB/s |
+| `mirrors.aliyun.com` | 5.5s | 1.2–2.6 MB/s | 0.66–1.10 MB/s |
+| `mirrors.tuna.tsinghua.edu.cn` | 2.0s | 14.8–16.1 MB/s | **7.8–9.5 MB/s** |
+| **`mirrors.ustc.edu.cn`** | **1.7s** | **27.6–34.6 MB/s** | 2.2–6.6 MB/s |
+
+**apt 与 pip 的最优源不是同一个**：apt 选中科大（约 30.7 MB/s，比清华快 2 倍），
+pip 选清华（约 8.7 MB/s，比中科大快 1.8 倍）。本次只改 apt（§17.9 认定的 95% 关键路径），
+pip 仍留 aliyun，见下方「下一步」。
+
+**实测效果**（测试机 31，真实 `Dockerfile.api`，构建到临时标签 `aptmirror-bench`，
+全程不触碰运行中容器与 `latest`）：
+
+| 层 | 生产机 16 基线（官方源） | 换源后（USTC） | 提速 |
+|---|---|---|---|
+| builder `apt-get`（`#15` / `#7`） | 714.6s | **15.7s** | 45× |
+| runtime `apt-get`（`#16` / `#6`，LibreOffice 181 包 / 223MB） | 1208.9s | **30.0s** | 40× |
+| `pip install`（`#20` / `#10`，aliyun，本次未改） | 147.9s | 342.9s | 见下注 |
+| **api 镜像总构建** | — | **372.4s（EXIT=0）** | — |
+
+镜像已验证可用：源确实指向 USTC（`grep URIs` 两段都是）、`soffice --version` =
+LibreOffice 25.2.3.2、`fastapi / celery / PIL / pymupdf / docx / pdfplumber / asyncpg`
+全部 import 通过、`services` 包正常。验证后已 `docker rmi` 临时标签并
+`git checkout -- docker/Dockerfile.api` 还原测试机工作区，`latest` 仍是 `332b029b1e47`。
+
+> **注：pip 层"变慢"与本次改动无关。** 同一层生产机 147.9s、测试机 342.9s，差异来自
+> 测试机 5G 内存 / 磁盘 92% / aliyun 当时只有 0.66–1.10 MB/s。但它现在占 api 构建的 **92%**，
+> 已成为 api 镜像的新瓶颈。
+
+**下一步（按收益排序，本次未做）**：
+
+1. **`web npm ci` 现在是全 compose 构建的关键路径**。生产机实测 729.5s，而 api 链
+   （372s）与 web 链（729.5 + 12.1 ≈ 742s）并行取大者，所以总时长预计从 **21m15s 降到约
+   13 分钟**，再往下必须动 npm。npmmirror 早已换过，说明慢的原因不是源地址，需要单独查
+   （怀疑方向：小包数量多导致延迟敏感、`node:20-alpine` 基础镜像缺失、磁盘 IO）。
+2. **`pip install` 换清华源**（实测 8.7 MB/s，比 aliyun 快约 10 倍），预期把 api 的
+   342.9s 压到 40s 量级。只需改 `Dockerfile.api` 第 33 行的 `--index-url` 与
+   `--trusted-host`。因第 1 条的存在，它对**总时长**收益有限，但能让「只重建 api」快很多。
+3. **生产机首次应用本改动会冷启动 apt 层**（Dockerfile 变了，该层及其后全部失效），
+   但走 USTC 只需约 46s（15.7 + 30.0），远优于原来的 1923.5s（714.6 + 1208.9）。
+   生产机磁盘 941G 空闲，无需为此清理任何东西。

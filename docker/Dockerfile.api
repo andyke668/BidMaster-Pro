@@ -6,8 +6,19 @@
 #   docker build -f docker/Dockerfile.api -t bidmaster-pro-api:latest .
 # ============================================================================
 
+# ─────────────── 全局构建参数 ───────────────
+# APT 国内镜像源。官方源 deb.debian.org 在境内实测仅 0.13 MB/s，单是 runtime
+# 阶段那 223 MB 依赖就要 20 分钟（生产机首建该层实测 1208.9 s）；换
+# mirrors.ustc.edu.cn（实测 34.6 MB/s）后同一层只要 30 s，约 40 倍提速。
+# 覆盖方式：docker build --build-arg APT_MIRROR=... 或 .env 里的 APT_MIRROR
+# 备选：mirrors.tuna.tsinghua.edu.cn（14.8 MB/s）、mirrors.aliyun.com（2.6 MB/s）
+ARG APT_MIRROR=mirrors.ustc.edu.cn
+
 # ─────────────── Stage 1: builder ───────────────
 FROM python:3.12-slim AS builder
+
+# 全局 ARG 不跨 stage 继承，每个 stage 都要重新声明才进入作用域
+ARG APT_MIRROR
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,7 +27,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # 编译期系统依赖（build-essential 编译 C 扩展；libpq-dev 编译 asyncpg；
 # libjpeg-dev/zlib1g-dev 编译 Pillow/pymupdf；libffi-dev 编译 cryptography）
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 换源说明：python:3.12-slim 是 Debian 13 trixie，用 deb822 格式的 debian.sources；
+# 同时兜底改老式 sources.list，两种格式都覆盖。sed 失败不致命（分号连接，
+# RUN 退出码由末尾的 apt-get 决定）。
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
         libjpeg-dev \
@@ -35,6 +51,8 @@ RUN pip install --prefix=/install --index-url https://mirrors.aliyun.com/pypi/si
 
 # ─────────────── Stage 2: runtime ───────────────
 FROM python:3.12-slim AS runtime
+
+ARG APT_MIRROR
 
 # PYTHONPATH=/app 确保 /app 完整源码优先于 site-packages
 # （避免 builder 阶段 pip install . 残留的不完整 services 包覆盖 /app 源码）
@@ -57,7 +75,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #   libreoffice-writer-nogui — docx → doc/pdf 无头转换；导出 .doc 的唯一可行方案
 #                              （pandoc 无 doc writer，docx2pdf 依赖 Windows/MS Word）
 #   fonts-noto-cjk      — LibreOffice 转 PDF 所需中日韩字体，缺失会整篇输出豆腐块
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 这是全镜像最慢的一层（LibreOffice 181 包 / 223 MB），换源收益最大。
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         libjpeg62-turbo \
         libgomp1 \
