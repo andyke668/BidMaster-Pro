@@ -12,20 +12,25 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 
 from services.database import get_db
 from services.middleware.rbac_middleware import get_current_user, require_permission
 from services.middleware.quota import enforce_quota
+from pathlib import Path
+
+from services import artifact_store
 from services.models import (
     Project, Document, Analysis, Chapter, CheckReport,
-    ProjectStatus, CheckType,
+    ProjectStatus, CheckType, ReviewRecord, ReviewFile,
 )
 from services.models import User
 from services.llm_factory import get_agent_gateway
 from core.skill_engine.base import SkillContext
 from core.task_manager import AsyncTask, TaskManager
 from core.settings import get_settings
+from core.http_headers import content_disposition
+from core.timeutil import utcnow_naive
 
 logger = logging.getLogger(__name__)
 # enforce_quota：每人每日用量配额。只统计写操作，GET 轮询一律放过。
@@ -662,8 +667,16 @@ async def check_deposit(
 
 
 async def _parse_uploaded_file(file: UploadFile) -> str:
-    suffix = os.path.splitext(file.filename or "")[1].lower()
-    content_bytes = await file.read()
+    return _parse_uploaded_bytes(await file.read(), file.filename)
+
+
+def _parse_uploaded_bytes(content_bytes: bytes, filename: str | None) -> str:
+    """按扩展名解析已读入的字节。
+
+    与 _parse_uploaded_file 拆开是为了让调用方先把 bytes 落盘留档、再解析，
+    避免为了留存把大标书读两遍（MAX_UPLOAD_BYTES 默认 500MB）。
+    """
+    suffix = os.path.splitext(filename or "")[1].lower()
     if len(content_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
@@ -1166,6 +1179,170 @@ async def submit_single_check(
 
 
 
+# ---------------------------------------------------------------------------
+# 上传模式审查档案：落盘 + 归档
+#
+# 标书检查员走的上传模式不建项目，改造前原件解析完即删、报告写在
+# tempfile.gettempdir()/bidmaster_exports（不在任何持久卷里，容器重启即丢），
+# 管理后台即便有 settings.monitor 权限也无从查看。下面这组函数把「一次审查」
+# 留档到 review_records / review_files，原件与报告落 uploads/reviews/{id}/。
+# ---------------------------------------------------------------------------
+
+
+async def _persist_review_inputs(
+    db: AsyncSession,
+    *,
+    review_id: str,
+    user: User,
+    source: str,
+    company_name: str = "",
+    school_name: str = "",
+    check_type: str | None = None,
+    files: tuple = (),
+) -> dict:
+    """把上传的原件落盘并建档，返回 {"record": ..., "files": [...]}。
+
+    留档失败不拖垮主流程：写不进卷（磁盘满、只读挂载）时记 warning 让检查照常跑，
+    比因为一个附加能力失败就把用户的主功能打成 500 合理。缺文件时记录仍会建，
+    管理员至少看得到「谁在何时审了什么」。
+    """
+    record = ReviewRecord(
+        id=review_id,
+        user_id=str(user.id),
+        user_email=user.email,
+        user_name=user.name,
+        source=source,
+        status="running",
+        company_name=(company_name or "").strip()[:200] or None,
+        school_name=(school_name or "").strip()[:200] or None,
+        check_type=check_type,
+        report_summary={},
+        report_data={},
+    )
+    db.add(record)
+
+    saved = []
+    for kind, filename, content in files:
+        try:
+            info = artifact_store.save_bytes(review_id, kind, filename, content)
+        except Exception as exc:
+            logger.warning("审查原件落盘失败 review=%s kind=%s: %s", review_id, kind, exc)
+            continue
+        db.add(ReviewFile(review_id=review_id, **info))
+        saved.append(info)
+
+    await db.flush()
+    return {"record": record, "files": saved}
+
+
+async def _discard_review(db: AsyncSession, review_id: str) -> None:
+    """任务没提交成功时撤掉刚落盘的档案，不留永远不会有报告的孤儿记录。"""
+    try:
+        await db.execute(sa_delete(ReviewFile).where(ReviewFile.review_id == review_id))
+        await db.execute(sa_delete(ReviewRecord).where(ReviewRecord.id == review_id))
+        await db.flush()
+    except Exception as exc:
+        logger.warning("回滚审查档案失败 review=%s: %s", review_id, exc)
+    try:
+        artifact_store.delete_review_dir(review_id)
+    except Exception as exc:
+        logger.warning("清理审查目录失败 review=%s: %s", review_id, exc)
+
+
+def _store_report_file(review_id: str, safe_name: str, content: bytes) -> dict | None:
+    """把报告写进 uploads/reviews/{review_id}/。失败返回 None，不影响审查结论。"""
+    if not review_id:
+        return None
+    try:
+        return artifact_store.save_bytes(review_id, "report", safe_name, content)
+    except Exception as exc:
+        logger.warning("审查报告落盘失败 review=%s: %s", review_id, exc)
+        return None
+
+
+def _store_report_legacy(safe_name: str, content: bytes) -> bool:
+    """持久卷写不进时的兜底：仍按老办法写 tempfile 目录，别让用户白等一场。
+
+    只在 _store_report_file 失败时走到这里。这个目录不在持久卷内、重启即丢，
+    所以管理后台也看不到这份报告——但至少当次用户能下载到自己刚跑完的结果。
+    """
+    try:
+        temp_dir = Path(tempfile.gettempdir()) / "bidmaster_exports"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        (temp_dir / Path(safe_name).name).write_bytes(content)
+        return True
+    except Exception as exc:
+        logger.warning("审查报告兜底落盘也失败 %s: %s", safe_name, exc)
+        return False
+
+
+async def _finalize_review(
+    review_id: str,
+    *,
+    ok: bool,
+    error: str | None = None,
+    summary: dict | None = None,
+    report_data=None,
+    report_file: dict | None = None,
+) -> None:
+    """把审查结果写回 review_records，并补上报告的 review_files 行。
+
+    必须自建会话：这是后台任务，提交请求时的那个会话早已关闭。
+    归档失败只记日志——审查结论已经通过任务结果返回给用户了，不能因为
+    管理后台的档案写不进去就把用户的成功任务翻成失败。
+    """
+    if not review_id:
+        return
+    from services.database import async_session
+
+    session_factory = async_session()
+    try:
+        async with session_factory() as db:
+            found = await db.execute(
+                select(ReviewRecord).where(ReviewRecord.id == review_id)
+            )
+            record = found.scalar_one_or_none()
+            if not record:
+                logger.warning("审查档案不存在，跳过归档 review=%s", review_id)
+                return
+            record.status = "success" if ok else "failed"
+            record.error_message = None if ok else (error or "审查失败")
+            record.finished_at = utcnow_naive()
+            if summary:
+                record.report_summary = summary
+            if report_data is not None:
+                record.report_data = report_data
+            if report_file:
+                db.add(ReviewFile(review_id=review_id, **report_file))
+            await db.commit()
+    except Exception as exc:
+        logger.warning("审查归档失败 review=%s: %s", review_id, exc)
+
+
+async def _archive_upload_check_result(review_id: str, result: dict) -> None:
+    """上传模式检查不产文件，把 JSON 结果存进 report_data 供管理后台预览。
+
+    存法与项目模式的 check_reports.results 一致（同为完整 JSON、不设上限），
+    让两条链路在管理端的呈现口径统一。
+    """
+    if not review_id or not isinstance(result, dict):
+        return
+    data = result.get("data")
+    ok = bool(result.get("success"))
+    summary: dict = {}
+    if isinstance(data, dict):
+        summary["check_types"] = sorted(data.keys())
+        if "has_critical" in result:
+            summary["has_critical"] = bool(result.get("has_critical"))
+    await _finalize_review(
+        review_id,
+        ok=ok,
+        error=result.get("error"),
+        summary=summary,
+        report_data=data if isinstance(data, (dict, list)) else {},
+    )
+
+
 @router.post("/tender-bid-review")
 async def tender_bid_review(
     bid_file: UploadFile = File(..., description="投标书(.docx/.pdf/.txt)"),
@@ -1177,39 +1354,78 @@ async def tender_bid_review(
 ):
     """投标文件审查：招标文件 + 投标书六维度交叉审查，返回异步任务ID。
 
-    任务完成后 task.result 包含 excel_base64 / file_name，前端可直接下载。
+    任务完成后 task.result 含 file_name / dimension_counts，前端凭 file_name
+    调 GET /check/tender-bid-review/download/{file_name} 下载报告。
+
+    留档：两份原件落 uploads/reviews/{review_id}/ 并写 review_records /
+    review_files，管理后台才能查看与下载。
     """
-    bid_text = await _parse_review_document(bid_file)
+    bid_bytes = await bid_file.read()
+    tender_bytes = await tender_file.read()
+    for content, label in ((bid_bytes, "投标书"), (tender_bytes, "招标文件")):
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{label}超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限",
+            )
+
+    # 先解析后落盘：解析会因空文件/扫描件抛 400，先校验就不会留下孤儿档案
+    bid_text = _parse_review_bytes(bid_bytes, bid_file.filename)
     if not bid_text.strip():
         raise HTTPException(status_code=400, detail="投标书内容为空或无法解析")
 
-    tender_text = await _parse_review_document(tender_file)
+    tender_text = _parse_review_bytes(tender_bytes, tender_file.filename)
     if not tender_text.strip():
         raise HTTPException(status_code=400, detail="招标文件内容为空或无法解析")
 
     bid_filename = bid_file.filename or "bid"
     tender_filename = tender_file.filename if tender_file else None
 
+    review_id = str(uuid.uuid4())
+    saved = await _persist_review_inputs(
+        db,
+        review_id=review_id,
+        user=current_user,
+        source="upload_review",
+        company_name=company_name,
+        school_name=school_name,
+        files=(
+            ("tender", tender_filename, tender_bytes),
+            ("bid", bid_filename, bid_bytes),
+        ),
+    )
+
     tm = TaskManager.instance()
     review_task_id = str(uuid.uuid4())
-    task = await tm.submit(
-        "tender_bid_review",
-        _do_tender_bid_review,
-        review_task_id,
-        tender_text,
-        bid_text,
-        company_name,
-        school_name,
-        bid_filename,
-        tender_filename,
-        task_id=review_task_id,
-        owner_id=current_user.id,
-    )
+    try:
+        task = await tm.submit(
+            "tender_bid_review",
+            _do_tender_bid_review,
+            review_task_id,
+            tender_text,
+            bid_text,
+            company_name,
+            school_name,
+            bid_filename,
+            tender_filename,
+            review_id,
+            task_id=review_task_id,
+            owner_id=current_user.id,
+        )
+    except Exception:
+        await _discard_review(db, review_id)
+        raise
+
+    record = saved["record"]
+    record.task_id = task.task_id
+    record.activity_id = task.activity_id
+    await db.flush()
 
     return {
         "task_id": task.task_id,
         "status": "pending",
         "source": "upload",
+        "review_id": review_id,
         "bid_filename": bid_filename,
         "tender_filename": tender_filename,
         "message": "投标文件审查任务已提交，请通过 GET /check/task/{task_id} 查询进度",
@@ -1224,8 +1440,14 @@ async def _do_tender_bid_review(
     school_name: str,
     bid_filename: str,
     tender_filename: str | None,
+    review_id: str = "",
 ):
-    """后台执行投标文件审查并生成 Excel。必须自建 DB 会话。"""
+    """后台执行投标文件审查并生成 Excel。必须自建 DB 会话。
+
+    review_id 追加在最后一个位置参数，理由同 _do_upload_check：
+    activity_logger 靠位置下标取 company_name / school_name / 文件名，
+    插在中间会让行为流水记错字段。
+    """
     from services.database import async_session
     from services.check.skills.tender_bid_review_skill import TenderBidReviewSkill
 
@@ -1254,33 +1476,66 @@ async def _do_tender_bid_review(
         )
         result = await skill.safe_execute(ctx)
 
+        data = dict(result.data or {})
         response = {
             "success": result.success,
-            "data": result.data,
+            "data": data,
             "error": result.error,
             "warnings": result.warnings,
             "source": "upload",
+            "review_id": review_id,
             "bid_filename": bid_filename,
             "tender_filename": tender_filename,
         }
 
-        if result.success and result.data.get("excel_base64"):
+        # 这两个都只用于归档，不回给前端：明细已落库供管理后台原生预览，
+        # excel_base64 几十 MB 留在任务结果里纯占内存（TaskManager 是进程内存储），
+        # 前端是凭 file_name 走下载接口取文件的。
+        dimension_data = data.pop("dimension_data", None)
+        excel_b64 = data.pop("excel_base64", None)
+
+        report_file = None
+        if result.success and excel_b64:
             import base64
-            excel_bytes = base64.b64decode(result.data["excel_base64"])
-            file_name = result.data.get("file_name", "投标文件审查.xlsx")
-            import os
-            import tempfile
-            temp_dir = os.path.join(tempfile.gettempdir(), "bidmaster_exports")
-            os.makedirs(temp_dir, exist_ok=True)
-            safe_name = re.sub(r'[\\/:*?\"<>|]', '_', file_name).strip()
-            safe_name = re.sub(r'_+', '_', safe_name)
-            if not safe_name.endswith('.xlsx'):
-                safe_name += '.xlsx'
-            out_path = os.path.join(temp_dir, safe_name)
-            with open(out_path, "wb") as f:
-                f.write(excel_bytes)
-            response["data"]["download_url"] = f"/check/tender-bid-review/download/{safe_name}"
-            response["data"]["file_name"] = safe_name
+
+            excel_bytes = base64.b64decode(excel_b64)
+            raw_name = data.get("file_name") or "投标文件审查.xlsx"
+            safe_name = artifact_store.safe_filename(raw_name, fallback="投标文件审查.xlsx")
+            if not safe_name.endswith(".xlsx"):
+                safe_name += ".xlsx"
+            # 报告落 uploads/reviews/{review_id}/ 而不是 /tmp：uploads 是持久卷，
+            # 容器重启后用户和管理员都还能下载（旧实现重启即丢，再点就是 404）。
+            report_file = _store_report_file(review_id, safe_name, excel_bytes)
+            if report_file:
+                safe_name = report_file["original_name"]
+                stored = True
+            else:
+                stored = _store_report_legacy(safe_name, excel_bytes)
+                if stored:
+                    logger.warning("审查报告未能写入持久卷，已回落临时目录 review=%s", review_id)
+            # 两处都写不进就不给下载链接：宁可让前端不显示下载按钮，
+            # 也不要给一个点开必然 404 的地址（审查结论本身仍在任务结果里）。
+            if stored:
+                data["file_name"] = safe_name
+                data["download_url"] = (
+                    f"/check/tender-bid-review/download/{safe_name}"
+                )
+
+        await _finalize_review(
+            review_id,
+            ok=bool(result.success),
+            error=result.error,
+            summary={
+                key: data[key]
+                for key in (
+                    "total_items", "high_count", "guardrail_missing",
+                    "guardrail_total", "dimension_counts", "errors", "generated_at",
+                )
+                if key in data
+            },
+            report_data=dimension_data if isinstance(dimension_data, (dict, list)) else {},
+            report_file=report_file,
+        )
 
         return response
 
@@ -1308,10 +1563,18 @@ async def _report_review_progress(task_id: str, skill_name: str, stage: str, pay
 
 async def _parse_review_document(file: UploadFile) -> str:
     """使用统一文档引擎解析审查文件，保留行号锚点并拒绝空扫描件。"""
+    return _parse_review_bytes(await file.read(), file.filename)
+
+
+def _parse_review_bytes(content_bytes: bytes, filename: str | None) -> str:
+    """同上，但接收已读入的字节。
+
+    拆出来是为了让调用方先拿到 bytes 落盘留档、再解析，避免为了留存把
+    大标书读两遍。行号锚点与扫描件拦截的行为与原实现完全一致。
+    """
     from core.doc_engine import get_parser
 
-    suffix = os.path.splitext(file.filename or "")[1].lower()
-    content_bytes = await file.read()
+    suffix = os.path.splitext(filename or "")[1].lower()
     if len(content_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限")
     if not suffix:
@@ -1338,8 +1601,8 @@ async def _parse_review_document(file: UploadFile) -> str:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("投标审查文件解析失败 %s: %s", file.filename, exc)
-        raise HTTPException(status_code=400, detail=f"文件解析失败：{file.filename}") from exc
+        logger.warning("投标审查文件解析失败 %s: %s", filename, exc)
+        raise HTTPException(status_code=400, detail=f"文件解析失败：{filename}") from exc
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
@@ -1348,29 +1611,56 @@ async def _parse_review_document(file: UploadFile) -> str:
 @router.get("/tender-bid-review/download/{file_name}")
 async def download_tender_bid_review(
     file_name: str,
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission("check.export")),
 ):
-    """下载投标文件审查 Excel。只允许下载 bidmaster_exports 目录下文件。"""
-    import tempfile
-    import os
-    from urllib.parse import quote
+    """下载投标文件审查 Excel。
 
-    temp_dir = os.path.join(tempfile.gettempdir(), "bidmaster_exports")
-    safe_name = os.path.basename(file_name)
-    file_path = os.path.join(temp_dir, safe_name)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="文件不存在或已过期")
-    if not safe_name.endswith(".xlsx"):
+    报告现在存 uploads/reviews/{review_id}/ 并登记在 review_files，这里按
+    「本人 + 报告文件名」反查：既保住前端只拿 file_name 的原有契约，又修掉了
+    旧实现写 /tmp 导致容器重启后必然 404「文件不存在或已过期」的问题。
+    仍保留对旧 bidmaster_exports 目录的回落，兼容升级瞬间在途的老任务。
+
+    只允许本人下载自己的报告（admin 例外），且路径必须落在 uploads 卷内。
+    """
+    from fastapi.responses import FileResponse
+
+    safe_name = artifact_store.safe_filename(file_name, fallback="")
+    if not safe_name or not safe_name.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
 
-    from fastapi.responses import FileResponse
-    encoded = quote(safe_name)
-    return FileResponse(
-        path=file_path,
-        filename=safe_name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+    media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    stmt = (
+        select(ReviewFile)
+        .join(ReviewRecord, ReviewRecord.id == ReviewFile.review_id)
+        .where(ReviewFile.kind == "report", ReviewFile.original_name == safe_name)
     )
+    if current_user.role != "admin":
+        stmt = stmt.where(ReviewRecord.user_id == str(current_user.id))
+    rows = (await db.execute(stmt.order_by(ReviewFile.created_at.desc()))).scalars().all()
+
+    for row in rows:
+        try:
+            path = artifact_store.resolve_within(row.stored_path, artifact_store.UPLOADS_ROOT)
+        except ValueError as exc:
+            logger.warning("报告路径非法，拒绝下载 %s: %s", row.stored_path, exc)
+            continue
+        if path.exists():
+            return FileResponse(
+                path=str(path), filename=safe_name, media_type=media,
+                headers=content_disposition(safe_name),
+            )
+
+    # 回落：改造上线瞬间提交的老任务，报告还躺在旧的临时目录里
+    legacy = Path(tempfile.gettempdir()) / "bidmaster_exports" / os.path.basename(safe_name)
+    if legacy.exists():
+        return FileResponse(
+            path=str(legacy), filename=safe_name, media_type=media,
+            headers=content_disposition(safe_name),
+        )
+
+    raise HTTPException(status_code=404, detail="文件不存在或已过期")
 
 @router.post("/upload-check")
 async def upload_and_check(
@@ -1387,37 +1677,72 @@ async def upload_and_check(
     文件解析仍在这里同步做，格式问题能立刻以 400 反馈，不必等轮询。
 
     db 只用于 get_db 的数据库就绪门禁（DB 不可用时直接 503，而不是提交一个注定失败的任务）。
+
+    留档：与 tender-bid-review 一样把原件落 uploads/reviews/{review_id}/ 并建档，
+    检查结果 JSON 由后台任务写进 review_records.report_data，管理后台可查看。
     """
     if check_type not in _CHECK_SKILL_MAP and check_type not in ("fullCheck", "selfcheck"):
         raise HTTPException(status_code=400, detail=f"不支持的检查类型: {check_type}")
 
-    bid_text = await _parse_uploaded_file(bid_file)
+    bid_bytes = await bid_file.read()
+    if len(bid_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {MAX_UPLOAD_BYTES // 1024 // 1024}MB 上限",
+        )
+    tender_bytes = (await tender_file.read()) if tender_file else b""
+
+    bid_text = _parse_uploaded_bytes(bid_bytes, bid_file.filename)
     if not bid_text.strip():
         raise HTTPException(status_code=400, detail="投标文件内容为空或无法解析")
 
     tender_text = ""
     if tender_file:
-        tender_text = await _parse_uploaded_file(tender_file)
+        tender_text = _parse_uploaded_bytes(tender_bytes, tender_file.filename)
 
     bid_filename = bid_file.filename or "bid"
     tender_filename = tender_file.filename if tender_file else None
 
-    tm = TaskManager.instance()
-    task = await tm.submit(
-        "upload_check",
-        _do_upload_check,
-        check_type,
-        tender_text,
-        bid_text,
-        bid_filename,
-        tender_filename,
-        owner_id=current_user.id,
+    review_id = str(uuid.uuid4())
+    to_store = [("bid", bid_filename, bid_bytes)]
+    if tender_file:
+        to_store.append(("tender", tender_filename, tender_bytes))
+    saved = await _persist_review_inputs(
+        db,
+        review_id=review_id,
+        user=current_user,
+        source="upload_check",
+        check_type=check_type,
+        files=tuple(to_store),
     )
+
+    tm = TaskManager.instance()
+    try:
+        task = await tm.submit(
+            "upload_check",
+            _do_upload_check,
+            check_type,
+            tender_text,
+            bid_text,
+            bid_filename,
+            tender_filename,
+            review_id,
+            owner_id=current_user.id,
+        )
+    except Exception:
+        await _discard_review(db, review_id)
+        raise
+
+    record = saved["record"]
+    record.task_id = task.task_id
+    record.activity_id = task.activity_id
+    await db.flush()
 
     return {
         "task_id": task.task_id,
         "status": "pending",
         "source": "upload",
+        "review_id": review_id,
         "check_type": check_type,
         "bid_filename": bid_filename,
         "tender_filename": tender_filename,
@@ -1430,6 +1755,26 @@ async def upload_and_check(
 
 
 async def _do_upload_check(
+    check_type: str,
+    tender_text: str,
+    bid_text: str,
+    bid_filename: str,
+    tender_filename: str | None,
+    review_id: str = "",
+):
+    """任务入口：跑检查，再把结果归档进 review_records。
+
+    review_id 追加在**最后一个位置参数**，为的是不动前面几个的下标——
+    activity_logger.TASK_ACTIVITY_META 靠位置下标取 check_type / 文件名。
+    """
+    result = await _run_upload_check(
+        check_type, tender_text, bid_text, bid_filename, tender_filename
+    )
+    await _archive_upload_check_result(review_id, result)
+    return result
+
+
+async def _run_upload_check(
     check_type: str,
     tender_text: str,
     bid_text: str,

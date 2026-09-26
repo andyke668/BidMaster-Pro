@@ -97,6 +97,32 @@ else
   bad "未取得 token，跳过监控接口校验"; FAIL=1
 fi
 
+say "4c. 管理后台文件与报告（v0.5.0）"
+CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://127.0.0.1:${API_PORT}/api/admin/reviews" 2>/dev/null || echo 000)
+if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then ok "匿名访问 /api/admin/reviews -> $CODE（权限守卫生效）"; else bad "匿名访问返回 $CODE，预期 401/403"; FAIL=1; fi
+TBL=$(docker exec "${PROJECT}-postgres-1" psql -U bidmaster -d bidmaster -tAc "select count(*) from information_schema.tables where table_schema='public' and table_name in ('review_records','review_files')" 2>/dev/null || echo 0)
+if [ "${TBL:-0}" -ge 2 ] 2>/dev/null; then ok "审查档案两张表已建（review_records / review_files）"; else bad "缺少审查档案表，请先跑 deploy_bidmaster.sh migrate"; FAIL=1; fi
+if [ -n "$TOKEN" ]; then
+  ST=$(curl -sS --max-time 20 -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${API_PORT}/api/admin/storage" 2>/dev/null || true)
+  case "$ST" in
+    *'"reviews"'*) ok "存储概览可读：$(printf '%s' "$ST" | head -c 220)" ;;
+    *) bad "存储概览异常：${ST:-无响应}"; FAIL=1 ;;
+  esac
+  RV=$(curl -sS --max-time 20 -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${API_PORT}/api/admin/reviews?range=all&page_size=5" 2>/dev/null || true)
+  case "$RV" in
+    *'"items"'*) ok "审查档案列表可读：$(printf '%s' "$RV" | head -c 200)" ;;
+    *) bad "审查档案列表异常：${RV:-无响应}"; FAIL=1 ;;
+  esac
+  PJ=$(curl -sS --max-time 20 -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${API_PORT}/api/admin/projects?range=all&page_size=5" 2>/dev/null || true)
+  case "$PJ" in
+    *'"items"'*) ok "项目模式文件列表可读" ;;
+    *) bad "项目模式文件列表异常：${PJ:-无响应}"; FAIL=1 ;;
+  esac
+  info "页面验证：${WEB_BASE}/admin →「文件与报告」页签（上传模式跑一次真实审查后才有数据）"
+else
+  bad "未取得 token，跳过文件与报告接口校验"; FAIL=1
+fi
+
 say "5. 数据库表与种子数据"
 PG="${PROJECT}-postgres-1"
 if docker exec "$PG" psql -U bidmaster -d bidmaster -tAc "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | sed 's/^/  表数量: /'; then

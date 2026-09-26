@@ -71,6 +71,9 @@ ACTION_LABELS: dict[str, str] = {
     "admin.force_logout": "管理员强制下线",
     "admin.set_active": "管理员启用/禁用账号",
     "admin.set_quota": "管理员调整配额",
+    "admin.view_files": "管理员查看标书档案",
+    "admin.download_file": "管理员下载标书文件",
+    "admin.delete_review": "管理员清理审查档案",
 }
 
 # 配额桶前缀。限流按桶计数，不按单个 action

@@ -1084,6 +1084,184 @@ export interface AdminActivityQuery {
   offset?: number;
 }
 
+// ───────────────────── 文件与报告（管理后台） ─────────────────────
+
+export type AdminReviewSource = 'upload_review' | 'upload_check';
+export type AdminReviewFileKind = 'tender' | 'bid' | 'report';
+export type AdminReviewStatus = 'running' | 'success' | 'failed';
+
+export interface AdminReviewFile {
+  file_id: string;
+  review_id: string;
+  kind: AdminReviewFileKind | string;
+  kind_label: string;
+  original_name: string | null;
+  file_size: number | null;
+  size_label: string;
+  sha256: string | null;
+  created_at: string;
+}
+
+export interface AdminReviewItem {
+  review_id: string;
+  user_id: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  source: AdminReviewSource | string;
+  source_label: string;
+  check_type: string | null;
+  company_name: string | null;
+  school_name: string | null;
+  status: AdminReviewStatus | string;
+  error_message: string | null;
+  task_id: string | null;
+  activity_id: string | null;
+  summary: Record<string, unknown>;
+  duration_ms: number | null;
+  created_at: string;
+  finished_at: string | null;
+  has_report_data: boolean;
+  files: AdminReviewFile[];
+}
+
+export interface AdminReviewDetail extends AdminReviewItem {
+  report_data: Record<string, Array<Record<string, unknown>>>;
+  dimension_labels: Record<string, string>;
+}
+
+export interface AdminReviewList {
+  range: AdminRange;
+  total: number;
+  page: number;
+  page_size: number;
+  items: AdminReviewItem[];
+}
+
+export interface AdminCleanupResult {
+  deleted: number;
+  freed_bytes: number;
+  freed_label: string;
+}
+
+export interface AdminProjectItem {
+  project_id: string;
+  name: string;
+  status: string;
+  user_id: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  document_count: number;
+  report_count: number;
+  created_at: string;
+}
+
+export interface AdminProjectList {
+  range: AdminRange;
+  total: number;
+  page: number;
+  page_size: number;
+  items: AdminProjectItem[];
+}
+
+export interface AdminProjectDocument {
+  document_id: string;
+  type: string;
+  type_label: string;
+  original_name: string;
+  file_size: number | null;
+  size_label: string;
+  available: boolean;
+  created_at: string;
+}
+
+export interface AdminProjectReportRow {
+  report_id: string;
+  type: string;
+  risk_level: string | null;
+  has_results: boolean;
+  created_at: string;
+}
+
+export interface AdminProjectFiles {
+  project: {
+    project_id: string;
+    name: string;
+    status: string;
+    user_name: string | null;
+    user_email: string | null;
+    created_at: string;
+  };
+  documents: AdminProjectDocument[];
+  reports: AdminProjectReportRow[];
+}
+
+export interface AdminReportJson {
+  report_id: string;
+  project_id: string | null;
+  project_name: string;
+  type: string;
+  risk_level: string | null;
+  summary: Record<string, unknown>;
+  results: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AdminReportText {
+  report_id: string;
+  project_name: string;
+  type: string;
+  format: string;
+  content: string;
+  size: number;
+}
+
+export interface AdminStorageStats {
+  reviews: {
+    records: number;
+    files: number;
+    db_bytes: number;
+    db_label: string;
+    disk_bytes: number;
+    disk_label: string;
+  };
+  project_documents: { files: number; db_bytes: number; db_label: string };
+  dimension_labels: Record<string, string>;
+}
+
+export interface AdminReviewQuery {
+  range?: AdminRange;
+  user_id?: string;
+  source?: string;
+  status?: string;
+  q?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface AdminProjectQuery {
+  range?: AdminRange;
+  user_id?: string;
+  q?: string;
+  page?: number;
+  page_size?: number;
+}
+
+/**
+ * 下载需要带 Authorization 头，所以不能直接用 <a href>，得走 axios 拿 blob 再触发保存。
+ * 文件名由调用方从列表行里带过来，不解析 Content-Disposition（跨浏览器口径不一致）。
+ */
+async function saveBlob(path: string, params: Record<string, string | number | undefined>, filename: string): Promise<void> {
+  const res = await api.get(path, { params, responseType: 'blob' });
+  const url = URL.createObjectURL(res.data as Blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const adminApi = {
   overview: (range: AdminRange = '7d') =>
     api.get<AdminOverview>(`/admin/overview?range=${range}`),
@@ -1108,17 +1286,34 @@ export const adminApi = {
   forceLogout: (userId: string) => api.post(`/admin/users/${userId}/force-logout`, {}),
   setUserStatus: (userId: string, isActive: boolean) =>
     api.put(`/admin/users/${userId}/status`, { is_active: isActive }),
-  exportCsv: async (what: 'users' | 'activities', params: Record<string, string | number | undefined>, filename: string) => {
-    const res = await api.get('/admin/export', { params: { what, ...params }, responseType: 'blob' });
-    const url = URL.createObjectURL(res.data as Blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-  },
+  exportCsv: (what: 'users' | 'activities', params: Record<string, string | number | undefined>, filename: string) =>
+    saveBlob('/admin/export', { what, ...params }, filename),
+
+  // ── 文件与报告：上传模式审查档案 ──
+  reviews: (params: AdminReviewQuery = {}) =>
+    api.get<AdminReviewList>('/admin/reviews', { params }),
+  reviewDetail: (reviewId: string) =>
+    api.get<AdminReviewDetail>(`/admin/reviews/${reviewId}`),
+  deleteReview: (reviewId: string) =>
+    api.delete<AdminCleanupResult>(`/admin/reviews/${reviewId}`),
+  cleanupReviews: (payload: { before_days?: number; review_ids?: string[] }) =>
+    api.post<AdminCleanupResult>('/admin/reviews/cleanup', payload),
+  downloadReviewFile: (reviewId: string, fileId: string, filename: string) =>
+    saveBlob(`/admin/reviews/${reviewId}/files/${fileId}/download`, {}, filename),
+
+  // ── 文件与报告：项目模式 ──
+  allProjects: (params: AdminProjectQuery = {}) =>
+    api.get<AdminProjectList>('/admin/projects', { params }),
+  projectFiles: (projectId: string) =>
+    api.get<AdminProjectFiles>(`/admin/projects/${projectId}/files`),
+  downloadDocument: (documentId: string, filename: string) =>
+    saveBlob(`/admin/documents/${documentId}/download`, {}, filename),
+  reportJson: (reportId: string) =>
+    api.get<AdminReportJson>(`/admin/reports/${reportId}`, { params: { format: 'json' } }),
+  reportMarkdown: (reportId: string) =>
+    api.get<AdminReportText>(`/admin/reports/${reportId}`, { params: { format: 'markdown' } }),
+
+  storage: () => api.get<AdminStorageStats>('/admin/storage'),
 };
 
 export default api;

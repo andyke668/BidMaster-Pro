@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)
+![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.12+-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-orange.svg)
 
@@ -30,6 +30,7 @@
 - **多 LLM 灵活切换**: DeepSeek / 硅基流动 / OpenAI / 通义千问 / Ollama 本地模型，可热切换
 - **RAG 知识库**: 企业资料 / 历史标书向量化存储 + 语义重排 + 公司画像过滤
 - **商机监控**: 招投标公告自动抓取 + 今日热点聚合 + 关键词精准匹配
+- **管理后台**: 全员使用监控（在线状态 / 行为流水 / Token / 配额）+ 标书文件与审查报告归档查看下载
 
 ---
 
@@ -366,7 +367,12 @@ if not gate_keeper.is_passed(project_id, "interpret"):
 
 ## 📝 更新日志
 
-当前版本 **v0.4.0**（2026-09-24）。本轮新增管理后台「使用监控」：全员用量、实时在线状态、行为流水、Token 消耗、风险告警与按人配额治理；同时把登录态从进程内字典迁到 `user_sessions` 表，服务重启不再全员掉线。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
+当前版本 **v0.5.0**（2026-09-26）。本轮给管理后台加了第 8 个页签「文件与报告」：管理员可按人、按时间翻到每一次标书审查，直接下载用户上传的招标文件与投标书原件、下载生成的审查报告，并在页面里原生预览报告明细（不烧 Token）；为此把「上传模式」从跑完即焚改成落盘留档（持久卷 `uploads/reviews/` + 两张新表），顺带修掉了审查报告写在临时目录、容器重启即丢的老问题。完整变更记录见 [CHANGELOG.md](CHANGELOG.md)，带标签的发布版本见 [GitHub Releases](https://github.com/andyke668/BidMaster-Pro/releases)。
+
+> **v0.5.0 升级须知**：新增 `review_records` / `review_files` 两张表，升级先执行
+> `bash deploy_bidmaster.sh migrate`（或手工跑 `db/migrations/002_review_artifacts.sql`）再重启 api。
+> 本次上线**之前**跑的上传模式审查没有留档（原件当时就删了、报告写在临时目录），管理后台
+> 只能看到上线之后的记录，历史数据找不回来。
 
 > **v0.4.0 升级须知**：本次给 `users` 表加了 `is_active` / `last_login_at` 两列，而启动时的
 > `Base.metadata.create_all` 只建缺失的表、**不会给已有表补列**。升级必须先执行

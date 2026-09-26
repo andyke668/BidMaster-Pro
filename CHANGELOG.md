@@ -13,6 +13,62 @@
 
 ---
 
+## [0.5.0] - 2026-09-26
+
+**管理后台「文件与报告」· 可查看 / 下载全员上传的招标件、投标书与审查报告**
+
+一句话总结：管理员现在能在后台按人、按时间翻到每一次标书审查，直接下载用户上传的招标文件与
+投标书原件、下载生成的审查报告，并在页面里原生预览报告明细。为此把「上传模式」从
+**跑完即焚**改成**落盘留档**——原件与报告写进持久卷 `uploads/reviews/{review_id}/`，
+并新增两张表登记。
+
+### ✨ 新增（Added）
+
+- **管理后台第 8 个页签「文件与报告」**（`/admin`，`settings.monitor` 权限 + 显式 admin 角色双重门禁）
+  - 存储概览：审查档案数、档案文件数、`uploads/reviews` 磁盘占用、项目模式文件数。
+  - 上传模式审查档案：按用户 / 来源 / 状态 / 关键字（文件名、公司、招标单位、用户）过滤 + 分页；
+    点开抽屉看基本信息、逐个下载招标件 / 投标件 / 报告原件、按维度折叠预览报告明细，可删除单条档案。
+  - 项目模式文件与报告：跨用户列出全部项目，点开抽屉下载项目下的招标 / 投标文件，查看历次审查报告。
+    渲染视图走 `CheckReportExportSkill`——该 skill 只做格式化、不调 LLM，所以**管理员翻报告零 Token 开销**；
+    渲染失败可一键切「原始 JSON」。
+  - 手动清理：按「N 天前」或指定 id 批量清理审查档案。**刻意不做自动过期**——投标文件属敏感商业资料，
+    何时删由管理员判断，而不是被一个写死的天数悄悄抹掉。
+  - 按需求确认：**不新增权限码、不加水印**，只有管理员能看，且能看到具体项目名与标书文件名。
+
+- **审查留档链路**（`services/artifact_store.py` + `db/migrations/002_review_artifacts.sql`）
+  - `review_records`：一次上传模式审查一行（谁、何时、审了哪两份文件、结论摘要、维度明细）。
+    `user_id` **刻意不建外键**，用户被删除后档案仍可查，故冗余 `user_email` / `user_name`。
+  - `review_files`：招标件 / 投标件 / 报告各一行，`review_id` 建外键且 `ON DELETE CASCADE`，配合手动清理不留孤儿。
+  - 落盘目录 `uploads/reviews/{review_id}/{kind}__{安全文件名}`；`uploads` 本就是持久卷，不用改编排。
+  - 文件名做净化（去路径分隔符与 Windows 保留字符）+ 同名加短哈希兜底而不覆盖；
+    `stored_path` 存**相对路径**（容器里 `/app`、本地开发仓库根都能解析），下载前强制做路径逃逸校验。
+
+- **管理端文件接口** `services/routers/admin_files.py`：`/api/admin` 下 10 个端点
+  （档案列表 / 详情 / 下载 / 删除 / 批量清理、项目列表 / 项目文件、文件下载、报告内容、存储概览）。
+  查看、下载、清理**全部写进行为流水**（`admin.view_files` / `admin.download_file` / `admin.delete_review`），
+  谁看过谁的标书可追溯。
+
+### 🔧 变更（Changed）
+
+- **上传模式审查报告改存持久卷**：原先 Excel 写在 `tempfile.gettempdir()/bidmaster_exports`，
+  不在任何持久卷里，容器一重启即丢，用户过一阵再点下载必然 404「文件不存在或已过期」。
+  现在写 `uploads/reviews/{review_id}/`，`GET /check/tender-bid-review/download/{file_name}`
+  改成按「本人 + 报告文件名」反查 `review_files`（admin 可跨用户），并保留对旧临时目录的回落，
+  兼容升级瞬间在途的老任务。
+- **任务结果瘦身**：`tender_bid_review` 的返回里摘掉 `excel_base64`（几十 MB 常驻进程内 TaskManager）
+  与 `dimension_data`；前端本来就只用 `file_name` + 下载接口，对外契约不变。
+- **前端管理后台拆公共模块**：样式常量与原子组件原先全写在 `AdminMonitorPage.tsx` 里，
+  新增页签会逼出第二份拷贝，故抽到 `components/admin/adminShared.tsx`；
+  新页签本体独立成 `components/admin/FilesTab.tsx`，不再往 1800 行的主文件里堆。
+
+### ⚠️ 升级须知
+
+- 先执行 `bash deploy_bidmaster.sh migrate`（跑 `db/migrations/002_review_artifacts.sql`，幂等）再重启 api。
+  `init_db` 的 `create_all` 也会建这两张新表，但迁移脚本是唯一可追溯的口径，别省。
+- **历史数据找不回来**：本次上线之前跑的上传模式审查，原件当时就被删了、报告写在临时目录里，
+  没有留档，管理后台只能看到上线之后的记录。
+- 新表只增不改，回滚只需回退镜像，两张空表留着无副作用。
+
 ## [0.4.0] - 2026-09-24
 
 **管理后台使用监控 · 全员用量 / 实时在线 / 行为流水 / Token / 配额治理**

@@ -420,6 +420,11 @@ class TenderBidReviewSkill(Skill):
             data={
                 "excel_base64": excel_bytes,
                 "file_name": f"投标文件审查_{output_company}_{output_school}.xlsx",
+                # 维度明细一并返回：调用方（routers/check.py）把它落进
+                # review_records.report_data，管理后台就能原生渲染预览，不必先下载
+                # Excel 才知道审出了什么。它会在回给前端前与 excel_base64 一起被摘掉，
+                # 不会撑大任务结果，前端仍只用 total_items / high_count / dimension_counts。
+                "dimension_data": dimension_data,
                 "total_items": total_items,
                 "high_count": high_count,
                 "guardrail_missing": guardrail_missing,

@@ -6,6 +6,9 @@
 >
 > **v0.4.0（2026-09-24）**：新增管理后台「使用监控」，基线 `ec0bc74`。升级顺序必须是
 > `code` → `migrate` → `llm` → `up` → `seed`（先迁移再重启 api，见 §16）。
+>
+> **v0.5.0（2026-09-26）**：管理后台新增「文件与报告」页签，上传模式改为落盘留档，
+> 迁移 `002_review_artifacts.sql`，见 §18。升级顺序同样是先 `migrate` 再重启 api。
 
 ## 1. 访问入口
 
@@ -940,3 +943,108 @@ LibreOffice 25.2.3.2、`fastapi / celery / PIL / pymupdf / docx / pdfplumber / a
 3. **生产机首次应用本改动会冷启动 apt 层**（Dockerfile 变了，该层及其后全部失效），
    但走 USTC 只需约 46s（15.7 + 30.0），远优于原来的 1923.5s（714.6 + 1208.9）。
    生产机磁盘 941G 空闲，无需为此清理任何东西。
+
+---
+
+## 18. v0.5.0 管理后台「文件与报告」（2026-09-26）
+
+### 18.1 需求与根因：为什么不是"加个页面"就行
+
+需求是「管理员在后台能看到每个用户上传的招标文件、投标书，以及生成的审查报告，可查看可下载」。
+v0.4.0 的监控后台已经有 `settings.monitor` 权限，但**看不到任何标书文件**，根因不在权限也不在页面，
+而在数据源头——标书检查员走的「上传模式」此前**不留任何持久数据**：
+
+| 环节 | 改造前的行为 | 后果 |
+|---|---|---|
+| 上传的招标 / 投标原件 | `_parse_review_document` 写 `NamedTemporaryFile`，解析完 `finally` 里 `os.unlink` | 原件当场消失，谁都拿不回来 |
+| 生成的审查报告 Excel | 写 `tempfile.gettempdir()/bidmaster_exports` | 该目录**不在任何持久卷**（compose 只挂 `projects` / `uploads` / `chroma`），容器重启即丢；用户过一阵再点下载必然 404 |
+| 数据库 | 上传模式**不建项目**，既无 `documents` 行也无 `check_reports` 行 | 关联不到用户，也关联不到行为流水 |
+
+所以 v0.5.0 的主体工作不是前端，而是**把这条链路改成落盘留档**。项目模式（建项目的那条路）
+本来就有 `documents` / `check_reports` 两张表和 `projects/` 持久卷，管理端直接读即可，
+不做二次落库以免产生需要同步的冗余副本。
+
+### 18.2 数据落地
+
+**两张新表**（`db/migrations/002_review_artifacts.sql`，全 `IF NOT EXISTS`，幂等）
+
+- `review_records`：一次上传模式审查一行。`user_id` **刻意不建外键**（与 `user_activity_log` 同理），
+  用户被删除后档案仍可查，故冗余 `user_email` / `user_name`。`report_summary` 存结论摘要
+  （`total_items` / `high_count` / 护栏命中），`report_data` 存维度明细供后台原生预览。
+- `review_files`：招标件 / 投标件 / 报告各一行。`review_id` **要**建外键且 `ON DELETE CASCADE`，
+  管理后台的「手动清理」靠它一次删干净不留孤儿。两处取舍正好相反：用户要能消失而档案留下，
+  档案被清理时则应连文件行一起走。
+
+**落盘目录** `uploads/reviews/{review_id}/{kind}__{安全文件名}`
+
+- 选 `uploads` 是因为它**本来就是持久卷**，不用改 compose、不用加卷、不用停机迁移。
+- `kind` 前缀（`tender` / `bid` / `report`）是为了让同名的招标件与投标件（实践中经常都叫「招标文件.docx」）
+  不互相覆盖；极端撞名再加 8 位 sha256 短哈希兜底——覆盖会让管理员下载到的文件与库里的 sha256 对不上。
+- 库里 `stored_path` 存**相对路径**（如 `uploads/reviews/{rid}/tender__x.docx`），不存绝对路径：
+  容器里是 `/app/...`、本地开发是仓库根，相对路径两边都能解析。
+- 下载前一律过 `artifact_store.resolve_within()`：`resolve()` 展开符号链接后必须仍在 `uploads/`
+  （或 `projects/`）内，否则 404。`stored_path` 虽然由我们自己写，但一旦库里被塞进 `../`
+  或绝对路径（历史数据、手工改库、将来的导入脚本），不校验就等于开了任意文件读取。
+
+### 18.3 权限与审计
+
+- 路由级三重门禁：`get_current_user` → `require_permission("settings.monitor")` → `require_admin_user`。
+  最后一层是**显式 admin 角色校验**（认 RBAC 角色名，并兼容内置管理员的 `users.role` 遗留字段）。
+  按需求确认**不新增权限码**：`settings.monitor` 目前只有 admin 持有，`project_manager` 在
+  `services/routers/rbac.py` 里用排除法显式排掉。加一层角色校验是防以后有人放宽权限码时，
+  顺手把全公司标书档案也放开。
+- 查看 / 下载 / 清理**全部写行为流水**：`admin.view_files` / `admin.download_file` / `admin.delete_review`，
+  `detail` 里带 `target_user`（被查看的那个用户）。管理员翻别人的标书是敏感操作，必须可追溯。
+- 不加下载水印（按需求确认）。
+
+### 18.4 升级步骤
+
+测试机（192.168.50.31）与生产机（192.168.50.16）步骤一致，差别只在生产机要带 profile 与项目名
+（见 §17.1）：
+
+```bash
+# 1) 取代码
+bash deploy_bidmaster.sh code
+# 2) 迁移（幂等，可重复执行）
+bash deploy_bidmaster.sh migrate
+# 3) 重建并重启（前端有新页签，web 镜像必须重建）
+bash deploy_bidmaster.sh up          # 生产机：PROJECT=zdx API_MEM_LIMIT=2g + --profile infra --profile web
+# 4) 探活
+curl -s http://127.0.0.1:8000/api/health   # 期望 version 0.5.0, db_ready true
+```
+
+> `init_db` 的 `Base.metadata.create_all` 其实也会建这两张新表（它只建缺失的表、不给已有表补列，
+> 而本次恰好只加表不加列，所以不迁移也能跑）。仍然要求先跑 `migrate`：迁移脚本是唯一可追溯的口径，
+> 且 002 里带索引，靠 `create_all` 建出来的索引名与迁移脚本一致纯属巧合，别赌。
+
+### 18.5 验证清单
+
+```bash
+# 表与索引
+docker compose -p <项目名> exec -T postgres psql -U postgres -d bidmaster -c '\d review_records'
+docker compose -p <项目名> exec -T postgres psql -U postgres -d bidmaster -c '\d review_files'
+
+# 持久卷里能看到档案目录
+docker compose -p <项目名> exec -T api ls -l uploads/reviews | head
+
+# 接口（需 admin token）
+curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8000/api/admin/storage'
+curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8000/api/admin/reviews?range=all&page_size=5'
+```
+
+页面侧：`http://<host>:8081/zdx/admin` → 「文件与报告」页签 → 上传模式跑一次真实的
+招投标文件审查 → 回列表应能看到这条记录，抽屉里三个文件（招标文件 / 投标书 / 审查报告）都能下载，
+报告明细能按维度展开。再验证：非 admin 账号访问 `/api/admin/reviews` 应 403。
+
+### 18.6 已知边界
+
+- **历史数据找不回来**：上线前跑的上传模式审查，原件当时就删了、报告在临时目录里，没有留档。
+  管理后台只能看到上线之后的记录。这不是 bug，是改造前根本没存。
+- 老任务的报告下载仍保留对 `tempfile.gettempdir()/bidmaster_exports` 的回落，
+  只兼容「升级瞬间在途」的任务；容器一重启该目录就没了，回落到期即失效。
+- `GET /api/admin/storage` 的磁盘占用只统计 `uploads/reviews`。项目模式文件散落在
+  `projects/{pid}/` 下，逐目录 walk 在大库上会明显拖慢这个接口，而它的量本来就能从
+  `documents.file_size` 推出来，故只给数据库口径。
+- 报告预览的 markdown / html 走 `CheckReportExportSkill`，该 skill 是纯格式化、不调 LLM，
+  所以管理员翻报告不产生模型开销；但它仍需 `get_agent_gateway(db, "check")` 能拿到网关配置，
+  LLM 未配置时会 500，前端给了「改看原始 JSON」的退路。

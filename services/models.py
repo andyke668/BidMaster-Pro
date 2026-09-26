@@ -540,3 +540,73 @@ class UserQuota(Base):
     note = Column(String(256), nullable=True)
     created_at = Column(DateTime, default=_naive_utcnow)
     updated_at = Column(DateTime, default=_naive_utcnow, onupdate=_naive_utcnow)
+
+
+class ReviewRecord(Base):
+    """上传模式审查记录：管理后台「文件与报告」页签的数据源。
+
+    标书检查员走的 CheckPage 是 POST /api/check/tender-bid-review，它**不建项目**，
+    所以既没有 documents 行也没有 check_reports 行。改造前上传的招标/投标原件
+    解析完即删、报告 Excel 写在 /tmp（非持久卷，重启即丢），管理后台无东西可看。
+    这张表把「一次审查」本身留档，文件另见 ReviewFile。
+
+    user_id 不建外键（同 UserActivityLog 的取舍）：用户被删除后档案仍需可查，
+    故冗余 user_email / user_name。
+    report_data 存 skill 的 dimension_data 明细，让后台能原生渲染预览，
+    不必先下载 Excel 才知道审出了什么。
+    """
+    __tablename__ = "review_records"
+    __table_args__ = (
+        Index("ix_rrec_user_created", "user_id", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    user_id = Column(String(36), nullable=True, index=True)
+    user_email = Column(String(255), nullable=True)
+    user_name = Column(String(100), nullable=True)
+    source = Column(String(32), nullable=False, index=True)
+    task_id = Column(String(64), nullable=True, index=True)
+    activity_id = Column(String(36), nullable=True)
+    company_name = Column(String(200), nullable=True)
+    school_name = Column(String(200), nullable=True)
+    check_type = Column(String(40), nullable=True)
+    status = Column(String(16), default="running", nullable=False, index=True)
+    error_message = Column(Text, nullable=True)
+    report_summary = Column(JSON, default=dict)
+    report_data = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_naive_utcnow, index=True)
+    finished_at = Column(DateTime, nullable=True)
+
+    files = relationship(
+        "ReviewFile",
+        back_populates="review",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ReviewFile(Base):
+    """一次审查涉及的文件（招标件 / 投标件 / 报告），一个文件一行。
+
+    stored_path 存**相对 /app** 的路径（如 uploads/reviews/{rid}/tender__x.docx），
+    不存绝对路径：容器里是 /app/...，本地开发是仓库根，存相对路径两边都能解析。
+    下载前必须做逃逸校验（解析后仍在 uploads/ 内），见 routers/admin_files.py。
+
+    review_id 建外键且级联删除：管理后台「手动清理」删记录时文件行一起走，
+    不留孤儿——与 ReviewRecord.user_id 故意不建外键的取舍正好相反。
+    """
+    __tablename__ = "review_files"
+
+    id = Column(String(36), primary_key=True, default=_uuid_default)
+    review_id = Column(
+        String(36), ForeignKey("review_records.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    kind = Column(String(20), nullable=False, index=True)
+    original_name = Column(String(255), nullable=True)
+    stored_path = Column(String(500), nullable=False)
+    file_size = Column(Integer, nullable=True)
+    sha256 = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=_naive_utcnow)
+
+    review = relationship("ReviewRecord", back_populates="files")

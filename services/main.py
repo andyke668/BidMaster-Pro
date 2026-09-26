@@ -28,7 +28,7 @@ from core.exceptions import (
 )
 from services.database import init_db, close_db, is_db_ready
 from services.middleware.route_activity import ActivityMonitorMiddleware
-from services.routers import projects, interpret, generate, check, format_doc, skills, llm_config, news, knowledge, rbac, ai_image, auth, agent_runtime, mineru_config, api_key, admin_monitor
+from services.routers import projects, interpret, generate, check, format_doc, skills, llm_config, news, knowledge, rbac, ai_image, auth, agent_runtime, mineru_config, api_key, admin_monitor, admin_files
 
 
 @asynccontextmanager
@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="智多星标书辅助系统 API",
     description="智多星标书辅助系统（Resourceful Star）· 全流程智能招投标平台",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
@@ -222,11 +222,12 @@ app.include_router(agent_runtime.router, prefix="/api/agent", tags=["多Agent编
 app.include_router(mineru_config.router, prefix="/api/mineru", tags=["MinerU OCR"])
 app.include_router(api_key.router, prefix="/api/api-keys", tags=["API Key 管理"])
 app.include_router(admin_monitor.router, prefix="/api/admin", tags=["使用监控"])
+app.include_router(admin_files.router, prefix="/api/admin", tags=["文件与报告"])
 
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "app": "智多星标书辅助系统", "app_en": "Resourceful Star", "version": "0.4.0", "db_ready": is_db_ready()}
+    return {"status": "ok", "app": "智多星标书辅助系统", "app_en": "Resourceful Star", "version": "0.5.0", "db_ready": is_db_ready()}
 
 
 @app.get("/api/stats")
