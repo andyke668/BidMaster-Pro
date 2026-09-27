@@ -60,6 +60,12 @@
 - **前端管理后台拆公共模块**：样式常量与原子组件原先全写在 `AdminMonitorPage.tsx` 里，
   新增页签会逼出第二份拷贝，故抽到 `components/admin/adminShared.tsx`；
   新页签本体独立成 `components/admin/FilesTab.tsx`，不再往 1800 行的主文件里堆。
+- **Web 镜像冷构建不再卡在 Electron 下载**：`docker/Dockerfile.web` 的 `npm ci` 会触发 `electron`
+  的 postinstall 从 GitHub Releases 拉桌面端二进制，国内网络常被中断（`npm error ReadError:
+  The server aborted pending request`）。此前靠构建层缓存侥幸命中，本次为腾磁盘 prune 掉 10.4GB
+  缓存后冷构建即失败。网页镜像只跑 `tsc && vite build`，用不到该二进制，故默认
+  `ELECTRON_SKIP_BINARY_DOWNLOAD=1` 跳过下载，并配 `ELECTRON_MIRROR` 与 npm 重试参数兜底；
+  需要产出桌面端时用 `--build-arg ELECTRON_SKIP_BINARY_DOWNLOAD=` 关掉跳过。
 
 ### ⚠️ 升级须知
 

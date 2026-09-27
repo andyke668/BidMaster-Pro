@@ -19,7 +19,21 @@ WORKDIR /build
 COPY packages/desktop/package*.json ./
 # 如果 lock 不存在，跳过 npm ci 回退到 npm install
 ARG NPM_REGISTRY=https://registry.npmmirror.com
-RUN npm config set registry ${NPM_REGISTRY} && if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# packages/desktop 的 devDependencies 含 electron，其 postinstall 会从 GitHub Releases
+# 下载桌面端二进制；而网页镜像只跑 tsc + vite build，用不到这个二进制。
+# 国内网络拉它常被中断（npm error ReadError: The server aborted pending request），
+# 此前靠构建层缓存侥幸命中，缓存一失效冷构建必挂。故默认跳过下载，
+# 并配好国内镜像源与 npm 重试参数兜底。需要产出桌面端时：
+#   docker build --build-arg ELECTRON_SKIP_BINARY_DOWNLOAD= ...
+ARG ELECTRON_SKIP_BINARY_DOWNLOAD=1
+ARG ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+ENV ELECTRON_SKIP_BINARY_DOWNLOAD=${ELECTRON_SKIP_BINARY_DOWNLOAD} \
+    ELECTRON_MIRROR=${ELECTRON_MIRROR}
+RUN npm config set registry ${NPM_REGISTRY} \
+ && npm config set fetch-retries 5 \
+ && npm config set fetch-retry-mintimeout 20000 \
+ && npm config set fetch-retry-maxtimeout 120000 \
+ && if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # 拷贝网页版源码与配置（tsconfig.json / vite.config.ts / renderer / preload / main）
 COPY packages/desktop/ ./
