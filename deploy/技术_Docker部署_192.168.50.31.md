@@ -1048,3 +1048,116 @@ curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8000/api/admin/revie
 - 报告预览的 markdown / html 走 `CheckReportExportSkill`，该 skill 是纯格式化、不调 LLM，
   所以管理员翻报告不产生模型开销；但它仍需 `get_agent_gateway(db, "check")` 能拿到网关配置，
   LLM 未配置时会 500，前端给了「改看原始 JSON」的退路。
+## 19. v0.5.0 上线到生产机 192.168.50.16（2026-09-28）
+
+### 19.1 与 v0.4.0 生产上线的三点不同
+
+| 项 | v0.4.0（§17） | v0.5.0（本次） |
+|---|---|---|
+| 执行通道 | XTerminal 图形终端手工敲 | **XTerminal MCP**（`xterminal_ssh_exec`，serverId `6aa224252782f743228dafa2`） |
+| `up` 耗时 | 21 分 15 秒（冷缓存 + apt 走 deb.debian.org） | **6 分 58 秒**（05:50:50 → 05:57:48 UTC） |
+| 额外步骤 | `code`→`migrate`→`pull`→`up`→`seed` | 只 `code`→`migrate`→`up`；**不跑 `llm`**（key 早已在 `.env`）、**不跑 `seed`**（v0.5.0 不新增权限码与种子数据）、**不跑 `pull`**（三个基础镜像都在） |
+
+快的三个原因：apt 已换 ustc（§17.11）、基础镜像与 Build Cache 都是热的（§17.9）、
+`Dockerfile.web` 新增 `ELECTRON_SKIP_BINARY_DOWNLOAD=1` 跳过了 Electron 二进制下载（§18）。
+
+> `andy` 的 SSH 公钥**只在测试机 31 上授权**，生产机 16 拒绝该密钥
+> （`Permission denied (publickey,password)`），测试机上也没有可跳板的私钥。
+> 生产机只能走 XTerminal MCP。
+
+### 19.2 执行记录
+
+```bash
+# ── 部署前：回滚锚点 + 备份（TS=20260928_054634）──
+docker tag bidmaster-pro-api:latest bidmaster-pro-api:rollback-v0.4.0   # d771b5973a1b
+docker tag bidmaster-pro-web:latest bidmaster-pro-web:rollback-v0.4.0   # 614b7cfab789
+# ~/backup/：bidmaster_pg_20260928_054634.sql.gz（135506 B，gzip -t 通过，26 COPY / 26 CREATE TABLE）
+#            env.20260928_054634.bak（chmod 600）、docker-compose.override.yml.20260928_054634.bak
+#            volumes_20260928_054634/{uploads,projects,chroma}.tgz
+#            （用 postgres:16-alpine 起临时容器 tar，避免为此拉 alpine）
+
+# ── 生产参数固化到 ~/deploy/prod_env.sh ──
+# PROJECT=zdx HOST_ADDR=192.168.50.16 WEB_BASE=/zdx
+# API_MEM_LIMIT=2g PG_MEM_LIMIT=512m WEB_MEM_LIMIT=128m
+# PG_USER=bidmaster PG_DB=bidmaster
+# SERVICES="api web celery-worker celery-beat"
+# 刻意不含 API_PORT / WEB_PORT（见 §17.2 的端口泄漏坑）
+set -a; . ~/deploy/prod_env.sh; set +a
+
+# ── 升级 ──
+git -C ~/bidmaster-pro checkout -- docker/docker-compose.override.yml   # 上次部署留下的脏文件会挡住 rebase
+bash ~/deploy/deploy_bidmaster.sh code       # rebase 到 f64f9ec（+ 部署补丁 5ad1964）
+cp ~/bidmaster-pro/deploy/deploy_bidmaster.sh ~/bidmaster-pro/deploy/verify_bidmaster.sh ~/deploy/
+bash ~/deploy/deploy_bidmaster.sh migrate    # 001 幂等跳过；002 新建 2 表；表数 26 → 28
+bash ~/deploy/deploy_bidmaster.sh up         # 后台执行，日志 ~/deploy/up_v050.log
+bash ~/deploy/verify_bidmaster.sh            # 全部通过
+```
+
+> **重启前的在线闸门**：`up` 会重建 api / web / celery（实测约 15–30 秒中断），执行前先查
+> ```sql
+> select count(*) from user_sessions
+>  where revoked_at is null
+>    and last_seen_at > (now() at time zone 'utc') - interval '3 minutes';
+> ```
+> 为 0 才继续。本次 05:50:50 UTC（北京周日 13:50）闸门通过。
+> `postgres / redis / mysql / minio` 四个基础设施容器全程未被触碰（仍 Up 2 weeks）。
+>
+> **脏 override 必须处理**：`write_config` 生成的 `docker/docker-compose.override.yml`
+> 是**被 git 跟踪的**，生产机上它相对仓库永远是脏的（`name: zdx` + 2g），
+> 会让下一次 `fetch_code` 的 `git rebase` 直接失败。因为它每次都会被同样参数重生成，
+> 升级前 `git checkout --` 丢弃即可（本次已先备份到 `/tmp` 与 `~/backup`）。
+
+### 19.3 验证结果（全部通过）
+
+- `/api/health` → `version 0.5.0, db_ready true`；表数 28、用户 11、RBAC 角色 5、Agent 配置 7
+- **4c 段**：`review_records` / `review_files` 已建（含 `review_files_review_id_fkey ... ON DELETE CASCADE`
+  与 `ix_review_files_kind` / `ix_review_files_review_id`）；匿名访问 `/api/admin/reviews` → 401；
+  存储概览可读（项目模式文件 1 个 / 509.3 KB）；档案列表可读（0 条，上线后才有数据）
+- `/api/admin/*` 共 23 条路由注册，其中 v0.5.0 新增 10 条
+- 前端 bundle `index-ywYiOuoK.js` 与测试机**同文件名**（同一份代码 + 同一份 lock），
+  含 `admin/reviews/cleanup` 与 `admin/storage` 特征串
+- **端口暴露面正确**：`docker port zdx-api-1` = `127.0.0.1:8000`；从 31 跨机实测
+  8000 CLOSED、8081 OPEN 且返回 0.5.0 —— §17.2 的端口泄漏未复现
+- **镜像 ID 一致**：api / celery-worker / celery-beat 三者同为 `5a0819cf7ef9` = `bidmaster-pro-api:latest`
+  —— §17.10 的标签漂移未复现（因为本次没有多余地跑 `build`）
+- api 日志重启后 5xx 计数 **0**；celery `celery@207f8bab42c1 ready.`
+- 资源：api 128.6MiB/2GiB、web 6.5MiB/128MiB、celery-worker 88.1MiB/1GiB、celery-beat 71.3MiB/512MiB
+- 磁盘 1005G 用 34G（4%）、Build Cache 14.12GB；**生产机不需要也不应该 prune**（§17.9）
+
+### 19.4 回滚方法
+
+```bash
+cd ~/bidmaster-pro/docker
+docker tag bidmaster-pro-api:rollback-v0.4.0 bidmaster-pro-api:latest   # d771b5973a1b
+docker tag bidmaster-pro-web:rollback-v0.4.0 bidmaster-pro-web:latest   # 614b7cfab789
+env -u API_PORT -u WEB_PORT docker compose -p zdx --profile infra --profile web \
+  up -d api web celery-worker celery-beat
+
+# 数据库通常无需回滚：002 只新增两张空表，v0.4.0 代码不读它们
+# 真要回滚：
+TS=$(cat ~/backup/.last_ts)
+zcat ~/backup/bidmaster_pg_$TS.sql.gz | docker exec -i zdx-postgres-1 psql -U bidmaster -d bidmaster
+```
+
+> 注意：v0.4.0 期间**实际在跑的** api 镜像 `abb37773dec1` 因 §17.10 的标签漂移已不可
+> `docker image inspect`（报 `No such image`），所以 `rollback-v0.4.0` 锚的是同一次构建的
+> 等价变体 `d771b5973a1b`（§17.10 已核对二者功能等价）。web 的锚点 `614b7cfab789`
+> 就是当时真正在跑的镜像，无此问题。
+
+### 19.5 遗留待办
+
+1. **`admin@bidmaster.pro` 仍是种子默认密码**（本次 `verify` 第 4 步正是用它登录成功的）。
+   这是生产环境的管理员账号，且 v0.5.0 让它多了一项「下载全员标书原件」的高权限能力，
+   **必须立即改密**，或干脆停用该账号、只保留 `andy@qq.com`（RBAC 已是 admin）。
+2. `redis`(16379) / `minio`(19000,19001) / `mysql`(3306) 仍绑 `0.0.0.0`，对整个内网开放
+   （本次为不改变既有行为而保留，与 §17.8 同）。
+3. **需要一次真实审查来验收留档链路**：`/app/uploads/reviews/` 目前还不存在（首次落盘时自动创建）。
+   上线后请用检查员账号跑一次上传模式审查，再到 `/zdx/admin` →「文件与报告」确认
+   招标件 / 投标件 / 报告三样都能下载、报告明细能按维度展开。
+4. 升级**不需要**用户重新登录：登录态在 `user_sessions` 表里，本次只重建容器、不动库
+   （与 v0.4.0 那次「登录态从进程内字典迁到数据库」不同，那次才需要全员重登）。
+5. GitHub 侧已打标签 `v0.5.0`（指向 `f64f9ec`）并创建 Release
+   <https://github.com/andyke668/BidMaster-Pro/releases/tag/v0.5.0>。
+   本机 `gh` 的 keyring token 已失效（`gh auth status` 报 invalid），
+   Release 是取 `git credential fill` 里那份带 `repo` 权限的 `gho_` token 直接调
+   `POST /repos/{owner}/{repo}/releases` 建出来的。
